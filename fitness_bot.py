@@ -202,7 +202,6 @@ async def start_cmd(message: types.Message, state: FSMContext):
     await message.answer("Добро пожаловать в фитнес-помощник!\nШаг 1: Введи рост в см:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(RegistrationStates.waiting_for_height)
 
-# ... [Логика последовательной регистрации без изменений для экономии места] ...
 @dp.message(RegistrationStates.waiting_for_height)
 async def process_height(message: types.Message, state: FSMContext):
     try:
@@ -412,7 +411,7 @@ async def manage_single_day(c: types.CallbackQuery):
     b.adjust(1)
     await c.message.edit_text(text, reply_markup=b.as_markup())
 
-# --- Вариант 1: Вручную ---
+# --- Вариант 1: Вручную (ИСПРАВЛЕННЫЙ ХЭНДЛЕР ВЕРНУТ ТЕБЯ В МЕНЮ КНОПОК) ---
 @dp.callback_query(F.data.startswith("calmanual_"))
 async def manual_add_meal_start(c: types.CallbackQuery, state: FSMContext):
     await state.update_data(target_day_id=int(c.data.split("_")[1]))
@@ -432,15 +431,42 @@ async def manual_add_meal_time(message: types.Message, state: FSMContext):
     if not re.match(r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$", t_str):
         await message.answer("Неверный формат. Введи строго ЧЧ:ММ:")
         return
+        
     d = await state.get_data()
+    day_id = d['target_day_id']
+    
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO meals (day_id, meal_name, meal_time) VALUES (?, ?, ?)", (d['target_day_id'], d['new_meal_name'], t_str))
+    cursor.execute("INSERT INTO meals (day_id, meal_name, meal_time) VALUES (?, ?, ?)", 
+                   (day_id, d['new_meal_name'], t_str))
     conn.commit()
+    
+    # Сразу подтягиваем обновленные данные по этому дню, чтобы вернуть пользователя в меню
+    cursor.execute("SELECT day_name, is_active FROM meal_days WHERE day_id = ?", (day_id,))
+    day_info = cursor.fetchone()
+    cursor.execute("SELECT meal_id, meal_name, meal_time FROM meals WHERE day_id = ? ORDER BY meal_time ASC", (day_id,))
+    meals = cursor.fetchall()
     conn.close()
+    
     update_scheduler_tasks()
-    await message.answer(f"Прием «{d['new_meal_name']}» добавлен!", reply_markup=get_main_keyboard())
     await state.clear()
+    
+    # Формируем меню дня заново, как при обычном просмотре
+    name, is_active = day_info
+    text = f"✅ Прием «{d['new_meal_name']}» добавлен!\n\n⚙️ **День: {name}** ({'Акт.' if is_active else 'Неакт.'})\n\n**Расписание:**\n"
+    text += "\n".join([f"▪️ {m_time} — {m_name}" for _, m_name, m_time in meals]) if meals else "❌ Пусто"
+
+    b = InlineKeyboardBuilder()
+    if not is_active: 
+        b.button(text="⭐ Сделать ОСНОВНЫМ", callback_data=f"calactivate_{day_id}")
+    b.button(text="🤖 Автонастройка ботом", callback_data=f"calauto_{day_id}")
+    b.button(text="✍️ Вписать еще прием", callback_data=f"calmanual_{day_id}")
+    b.button(text="🗑️ Очистить это расписание", callback_data=f"calclear_{day_id}")
+    b.button(text="⬅️ Назад в календарь", callback_data="cal_back_root")
+    b.adjust(1)
+    
+    # Отправляем сообщение со встроенной клавиатурой, чтобы можно было кликать дальше
+    await message.answer(text, reply_markup=b.as_markup())
 
 # --- Вариант 2: Автонастройка ботом ---
 @dp.callback_query(F.data.startswith("calauto_"))
@@ -603,7 +629,7 @@ async def process_const_reps(c: types.CallbackQuery, state: FSMContext):
 # ==================== ДНЕВНИК ПИТАНИЯ (ДОБАВЛЕНИЕ ЕДЫ) ====================
 @dp.message(F.text == "🍽️ Добавить еду")
 async def eat_cmd(message: types.Message, state: FSMContext):
-    await message.answer("📝 Введи съеденные продукты через запятую (например: `2шт яиц, 100г овсянка, 50г семечки`):", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("📝 Введи съеденные продукты через запятую (например: `2шт яиц, 100г овсянка`):", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(FoodStates.waiting_for_batch)
 
 @dp.message(FoodStates.waiting_for_batch)
