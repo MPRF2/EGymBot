@@ -265,7 +265,7 @@ CONSTRUCTOR_EXERCISES = {
             "Подъем штанги на бицепс с EZ-грифом стоя", "Подъем гантелей на бицепс на наклонной скамье",
             "Сгибания Скотта с EZ-штангой / гантелью", "Молотковые сгибания с гантелями (Хаммер)",
             "Концентрированные сгибания рук с гантелью", "Подъем штанги на бицепс прямым грифом стоя",
-            "Сгибания рук в кроссовере у верхних блоков", "Сгибания 'Паук'",
+            "Сгибания рук в кроссовере у upper блоков", "Сгибания 'Паук'",
             "Подъем гантелей на бицепс стоя с супинацией", "Сгибания рук на нижнем блоке с канатом",
             "Сгибания рук в тренажере Скотта", "Молотковые сгибания с уводом руки вовнутрь (Cross Body)",
             "Подъем штанги на бицепс обратным хватом", "Сгибания Зоттмана с гантелями",
@@ -988,26 +988,50 @@ async def eat_cmd(message: types.Message, state: FSMContext):
 
 @dp.message(FoodStates.waiting_for_batch)
 async def process_food_batch(message: types.Message, state: FSMContext):
-    parts = message.text.split(",")
+    raw_text = message.text.lower().strip()
+    
+    # Защита от дробных чисел с запятой (превращаем 1,5 в 1.5)
+    raw_text = re.sub(r'(\d+),(\d+)', r'\1.\2', raw_text)
+    
+    parts = raw_text.split(",")
     tc, tp, tj, tu = 0.0, 0.0, 0.0, 0.0
     found_summary = []
     
     for part in parts:
-        part = part.strip().lower()
-        # Извлекаем числа до очистки букв, заменяя только запятую на точку в рамках этого фрагмента
-        num_match = re.findall(r'[\d.]+', part.replace(",", "."))
-        if not num_match: continue
+        part = part.strip()
+        if not part:
+            continue
+            
+        num_match = re.findall(r'[\d.]+', part)
+        if not num_match: 
+            continue
+            
         val = float(num_match[0])
         
         food_name, info = find_food_in_db(part)
-        if not food_name: continue
+        if not food_name: 
+            continue
+            
         w = val * info.get("piece_weight", 100.0) if "шт" in part else val
         ratio = w / 100.0
-        tc += info['cals'] * ratio
-        tp += info['prot'] * ratio
-        tj += info['fats'] * ratio
-        tu += info.get('carbs', 0.0) * ratio
-        found_summary.append(f"• {food_name.split()[0].capitalize()} {int(w)}г")
+        
+        # Расчет КБЖУ для конкретного элемента
+        item_cals = info['cals'] * ratio
+        item_prot = info['prot'] * ratio
+        item_fats = info['fats'] * ratio
+        item_carbs = info.get('carbs', 0.0) * ratio
+        
+        # Суммирование в общие переменные приема пищи
+        tc += item_cals
+        tp += item_prot
+        tj += item_fats
+        tu += item_carbs
+        
+        display_name = food_name.split()[0].capitalize()
+        found_summary.append(
+            f"• **{display_name}** {int(w)}г "
+            f"({round(item_cals)} ккал | Б: {round(item_prot, 1)}г | Ж: {round(item_fats, 1)}г | У: {round(item_carbs, 1)}г)"
+        )
 
     if not found_summary:
         await message.answer("❌ Продукты не найдены в базе. Проверь написание (курица, овсянка, семечки, яйца).", reply_markup=get_main_keyboard())
@@ -1023,7 +1047,15 @@ async def process_food_batch(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    await message.answer(f"➕ Добавлено:\n" + "\n".join(found_summary) + f"\n\n🔥 +{round(tc)} ккал в дневной зачет!", reply_markup=get_main_keyboard())
+    response_text = (
+        f"➕ **Добавлено в дневник:**\n"
+        f"{'\n'.join(found_summary)}\n\n"
+        f"🔥 **Итого за прием:**\n"
+        f"▪️ Калории: `+{round(tc)}` ккал\n"
+        f"▪️ Белки: `+{round(tp, 1)}`г | Жиры: `+{round(tj, 1)}`г | Углеводы: `+{round(tu, 1)}`г"
+    )
+    
+    await message.answer(response_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
     await state.clear()
 
 async def main():
