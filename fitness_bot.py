@@ -32,7 +32,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, 
@@ -54,7 +53,6 @@ def init_db():
         )
     """)
     
-    # Таблица шаблонов дней для Календаря питания
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS meal_days (
             day_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +63,6 @@ def init_db():
         )
     """)
     
-    # Таблица конкретных приемов пищи в шаблоне
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS meals (
             meal_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +73,6 @@ def init_db():
         )
     """)
 
-    # Таблица сохраненных тренировок
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS workouts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +85,6 @@ def init_db():
         )
     """)
 
-    # Таблица лога съеденного за день
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_log (
             user_id INTEGER,
@@ -104,7 +99,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === БАЗА ДАННЫХ ПРОДУКТОВ ===
+# === МАСШТАБИРОВАННАЯ БАЗА ДАННЫХ ПРОДУКТОВ ===
 FOOD_DATABASE = {
     "куриное филе грудка курица куриная грудка сырая": {"cals": 113, "prot": 23.6, "fats": 1.9, "carbs": 0.0, "cat": "Белки"},
     "куриная грудка запеченная готовая вареная": {"cals": 150, "prot": 30.0, "fats": 3.2, "carbs": 0.0, "cat": "Белки"},
@@ -174,7 +169,7 @@ FOOD_DATABASE = {
     "протеин сывороточный порошок изолят": {"cals": 390, "prot": 75.0, "fats": 6.0, "carbs": 8.0, "cat": "Спортпит"},
     "гейнер белково-углеводный": {"cals": 380, "prot": 25.0, "fats": 3.0, "carbs": 63.0, "cat": "Спортпит"},
     "казеин ночной протеин": {"cals": 360, "prot": 80.0, "fats": 1.5, "carbs": 3.0, "cat": "Спортпит"},
-    "proyein_bar протеиновый батончик протеиновые": {"cals": 350, "prot": 33.0, "fats": 10.0, "carbs": 25.0, "piece_weight": 60, "cat": "Спортпит"},
+    "протеиновый батончик протеиновые": {"cals": 350, "prot": 33.0, "fats": 10.0, "carbs": 25.0, "piece_weight": 60, "cat": "Спортпит"},
 
     "пельмени отварные": {"cals": 245, "prot": 11.3, "fats": 13.2, "carbs": 20.7, "cat": "Столовая"},
     "борщ с говядиной борща": {"cals": 60, "prot": 4.0, "fats": 3.0, "carbs": 5.0, "cat": "Столовая"},
@@ -184,7 +179,7 @@ FOOD_DATABASE = {
     "котлета куриная паровая": {"cals": 140, "prot": 18.0, "fats": 6.0, "carbs": 4.0, "piece_weight": 80, "cat": "Столовая"}
 }
 
-# === БАЗА УПРАЖНЕНИЙ ===
+# === МАСШТАБИРОВАННАЯ БАЗА УПРАЖНЕНИЙ ===
 CONSTRUCTOR_EXERCISES = {
     "Грудь (Верхний пучок)": [
         "Жим штанги на наклонной скамье 30°", "Жим гантелей на наклонной скамье",
@@ -213,7 +208,7 @@ CONSTRUCTOR_EXERCISES = {
         "Подтягивания узким обратным хватом", "Тяга в вертикальном Хаммере на широчайшие",
         "Пуловер с гантелью лежа горизонтально", "Тяга верхнего блока к груди обратным хватом",
         "Подтягивания параллельным хватом", "Тяга горизонтального блока к поясу широким хватом",
-        "Тяга верхнего блока с изогнутой рукоятью", "Австралийские подтягивания широким хватом",
+        "Тяга верхнего блока с изогнутой рукоятью (коромысло)", "Австралийские подтягивания широким хватом",
         "Пуловер на блоке прямой рукоятью стоя"
     ],
     "Спина (Толщина / Плотность)": [
@@ -230,7 +225,7 @@ CONSTRUCTOR_EXERCISES = {
         "Махи гантелями в стороны стоя", "Махи в стороны на среднюю дельту в кроссовере",
         "Отводы рук в стороны в тренажере", "Тяга штанги к подбородку широким хватом",
         "Махи гантелями в стороны сидя", "Махи одной рукой в сторону у нижнего блока",
-        "Тяга за тросы в кроссовере на среднюю дельту", "Махи гантелями в стороны лежа на боку",
+        "Тяга за тросы в кроссовере на среднюю дельту", "Махи гантелями в стороны лежа на боку (наклонная скамья)",
         "Тяга Ли Хейни сзади со штангой", "Махи гирями в стороны стоя",
         "Махи в стороны с удержанием в пиковой точке 2 секунды", "Частичные махи тяжелыми гантелями в стороны",
         "Махи из-за спины на нижнем блоке одной рукой", "Тяга к подбородку с гантелями широким хватом",
@@ -241,7 +236,7 @@ CONSTRUCTOR_EXERCISES = {
         "Махи гантелями в наклоне на заднюю дельту", "Разведения рук назад в тренажере (Reverse Fly)",
         "Тяга Ли Хейни на заднюю дельту", "Жим Арнольда сидя",
         "Махи перед собой с гантелями попеременно", "Подъем блина перед собой на переднюю дельту",
-        "Разведение рук назад в кроссовере (Face Pulls)", "Махи гантелями на заднюю дельту лежа на скамье",
+        "Разведение рук назад в кроссовере (Face Pulls)", "Махи гантелями на заднюю дельту лежа на животе",
         "Жим штанги из-за головы сидя", "Махи перед собой на нижнем блоке с канатом",
         "Разведения назад у пег-дек одной рукой", "Жим гантелей стоя параллельным хватом",
         "Махи назад с тросом в кроссовере без рукояток"
@@ -250,16 +245,16 @@ CONSTRUCTOR_EXERCISES = {
         "Подъем штанги на бицепс с EZ-грифом стоя", "Подъем гантелей на бицепс на наклонной скамье",
         "Сгибания Скотта с EZ-штангой / гантелью", "Молотковые сгибания с гантелями (Хаммер)",
         "Концентрированные сгибания рук с гантелью", "Подъем штанги на бицепс прямым грифом стоя",
-        "Сгибания рук в кроссовере у верхних блоков", "Сгибания 'Паук' на наклонной скамье",
+        "Сгибания рук в кроссовере у верхних блоков", "Сгибания 'Паук'",
         "Подъем гантелей на бицепс стоя с супинацией", "Сгибания рук на нижнем блоке с канатом",
-        "Сгибания рук в тренажере Скотта", "Молотковые сгибания с уводом руки вовнутрь",
+        "Сгибания рук в тренажере Скотта", "Молотковые сгибания с уводом руки вовнутрь (Cross Body)",
         "Подъем штанги на бицепс обратным хватом", "Сгибания Зоттмана с гантелями",
         "Подъем гантелей на бицепс сидя на горизонтальной скамье"
     ],
     "Руки (Трицепс)": [
         "Французский жим лежа со штангой / гантелями", "Разгибания рук на верхнем блоке с канатом",
         "Жим штанги узким хватом горизонтально", "Разгибание руки из-за головы с гантелью / блока",
-        "Отжимания на брусьях на трицепс (вертикально)", "Французский жим стоя с EZ-грифом из-за головы",
+        "Отжимания на брусьях на triцепс (вертикально)", "Французский жим стоя с EZ-грифом из-за головы",
         "Разгибания рук на блоке прямой рукоятью книзу", "Разгибания одной руки обратным хватом на блоке",
         "Кикбэк (Kickback) с гантелью в наклоне", "Отжимания от скамьи сзади (провалы)",
         "Калифорнийский жим штанги", "Разгибания рук с канатом из-за головы у нижнего блока",
@@ -268,22 +263,22 @@ CONSTRUCTOR_EXERCISES = {
     ],
     "Ноги (Квадрицепс / Общий объем)": [
         "Приседания со штангой на спине", "Жим ногами в платформе 45 градусов",
-        "Гакк-приседания в тренажере", "Разгибания ног сидя в тренажере",
+        "Гакк-приседания в тренажере", "Разгибания ног сидя в тренажере (Изоляция)",
         "Выпады с гантелями на месте / в шаге", "Фронтальные приседания со штангой на груди",
         "Сисси-приседания (Sissy Squats)", "Приседания в тренажере Смита с выносом ног вперед",
         "Болгарские сплит-приседания с гантелями", "Шаги на тумбу с гантелями в руках",
-        "Приседания плие с гирей / гантелью между ног", "Кубковые приседания (Goblet Squat) с гантелью перед грудью",
+        "Приседания плие с гирей / гантелью между ног", "Кубковые приседания (Goblet Squat)",
         "Выпады назад попеременно", "Жим ногами в платформе одной ногой",
-        "Приседания со штангой над головой (оверхед)"
+        "Приседания со штангой над головой"
     ],
     "Ноги (Бицепс бедра / Голень)": [
         "Румынская становая тяга со штангой / гантелями", "Сгибания ног лежа в тренажере",
-        "Сгибания ног сидя в тренажере", "Подъемы на носки стоя в тренажере",
+        "Сгибания ног сидя в тренажере", "Подъемы на носки стоя в тренажере (голень)",
         "Подъемы на носки сидя в тренажере", "Мертвая тяга (на прямых ногах)",
         "Сгибания ног стоя поочередно в тренажере", "Гиперэкстензия с акцентом на бицепс бедра",
         "Подъемы 'Ослик' на голень", "Подъемы на носки в тренажере для жима ногами",
-        "Ягодичный мостик со штангой на скамье", "Тяга Кинга (приседания на одной ноге)",
-        "Сгибания ног с фитболом лежа на полу", "Подъемы на носки стоя на одной ноге",
+        "Ягодичный мостик со штангой на скамье", "Тяга Кинга",
+        "Сгибания ног с фитболом лежа на полу", "Подъемы на носки стоя на одной ноге с гантелью",
         "Разведение ног в тренажере сидя"
     ]
 }
@@ -297,7 +292,7 @@ def find_food_in_db(raw_part):
     clean_text = raw_part.lower().strip()
     clean_text = re.sub(r'[\d.]+', '', clean_text)
     clean_text = re.sub(r'\b(шт|грамм|грамма|граммов|г|кг|мл|л|литр|литра|литров)\b', '', clean_text)
-    words = [Лемматизатор_Мини(w) for w in re.findall(r'[а-яА-Яa-zA-Z0-9%]+', clean_text) if len(w) > 1]
+    words = [Лемматизатор_Мини(w) for w in re.findall(r'[а-яА-Яa-zada-zA-Z0-9%]+', clean_text) if len(w) > 1]
     if not words: return None, None
     best_match, max_matches = None, 0
     for db_key, info in FOOD_DATABASE.items():
@@ -388,7 +383,7 @@ dp = Dispatcher(storage=MemoryStorage())
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Добро пожаловать в фитнес-помощник!\nШаг 1: Введи рост в см:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Доброобраловать в фитнес-помощник!\nШаг 1: Введи рост в см:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(RegistrationStates.waiting_for_height)
 
 @dp.message(RegistrationStates.waiting_for_height)
@@ -511,17 +506,16 @@ async def process_experience(message: types.Message, state: FSMContext):
     await message.answer("Шаг 11: Выбери цель текущего периода (обязательно):", reply_markup=b.as_markup())
     await state.set_state(RegistrationStates.waiting_for_goal)
 
-# ИСПРАВЛЕННЫЙ ХЭНДЛЕР ВЫБОРА ЦЕЛИ (теперь перехватывает клик гарантированно)
+# ИСПРАВЛЕНО: Теперь ловим callback_query четко по тексту данных
 @dp.callback_query(F.data.startswith("goal_"))
 async def process_final_calculations(c: types.CallbackQuery, state: FSMContext):
     g = c.data.split("_")[1]
     d = await state.get_data()
     
-    # Защита от потери данных сессии, если анкета сбилась
-    height = d.get('height', 175.0)
-    weight = d.get('weight', 70.0)
-    age = d.get('age', 25)
-    strength_workouts = d.get('strength_workouts', 3)
+    height = d['height']
+    weight = d['weight']
+    age = d['age']
+    strength_workouts = d['strength_workouts']
     body_fat = d.get('body_fat', None)
     daily_steps = d.get('daily_steps', 6000)
     cardio_per_week = d.get('cardio_per_week', 0)
@@ -583,7 +577,6 @@ async def process_final_calculations(c: types.CallbackQuery, state: FSMContext):
     conn.close()
     
     update_scheduler_tasks()
-    await state.clear()
     
     report_text = (
         f"🎉 **Профиль успешно сохранен!**\n\n"
@@ -596,6 +589,7 @@ async def process_final_calculations(c: types.CallbackQuery, state: FSMContext):
     )
     
     await c.message.answer(report_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    await state.clear()
     await c.answer()
 
 # ==================== УПРАВЛЕНИЕ ПРОФИЛЕМ И КБЖУ ====================
@@ -802,7 +796,7 @@ async def save_new_day_template(message: types.Message, state: FSMContext):
     await message.answer("Шаблон добавлен!", reply_markup=get_main_keyboard())
     await state.clear()
 
-# ИСПРАВЛЕНА ОПЕЧАТКА ТУТ (Было "calactivate_{day_id}")
+# ИСПРАВЛЕНО: Убрана неверная интерполяция {day_id} из строки фильтра фильтра
 @dp.callback_query(F.data.startswith("calactivate_"))
 async def act_day(c: types.CallbackQuery):
     d_id = int(c.data.split("_")[1])
@@ -871,7 +865,7 @@ async def clear_workout_split(c: types.CallbackQuery):
     cursor.execute("DELETE FROM workouts WHERE user_id = ?", (c.from_user.id,))
     conn.commit()
     conn.close()
-    await c.answer("Твой тренировочный сплит очищен!", show_alert=True)
+    await c.answer("Тренировочный сплит успешно полностью очищен!", show_alert=True)
     await show_workout_menu(c.message)
 
 @dp.callback_query(F.data == "const_start")
@@ -884,7 +878,7 @@ async def start_constructor(c: types.CallbackQuery, state: FSMContext):
     await c.message.edit_text("🛠️ Выбери день недели для записи тренировки:", reply_markup=b.as_markup())
     await state.set_state(ConstructorStates.waiting_for_day)
 
-@dp.callback_query(F.data.startswith("cday_"))
+@dp.callback_query(ConstructorStates.waiting_for_day, F.data.startswith("cday_"))
 async def process_const_day(c: types.CallbackQuery, state: FSMContext):
     await state.update_data(chosen_day=c.data.split("_")[1])
     b = InlineKeyboardBuilder()
@@ -893,7 +887,7 @@ async def process_const_day(c: types.CallbackQuery, state: FSMContext):
     await c.message.edit_text("Выбери целевую мышечную группу:", reply_markup=b.as_markup())
     await state.set_state(ConstructorStates.waiting_for_muscle)
 
-@dp.callback_query(F.data.startswith("cmuscle_"))
+@dp.callback_query(ConstructorStates.waiting_for_muscle, F.data.startswith("cmuscle_"))
 async def process_const_muscle(c: types.CallbackQuery, state: FSMContext):
     muscle = c.data.split("_")[1]
     await state.update_data(chosen_muscle=muscle)
@@ -904,7 +898,7 @@ async def process_const_muscle(c: types.CallbackQuery, state: FSMContext):
     await c.message.edit_text("Выбери упражнение:", reply_markup=b.as_markup())
     await state.set_state(ConstructorStates.waiting_for_exercise)
 
-@dp.callback_query(F.data.startswith("cex_"))
+@dp.callback_query(ConstructorStates.waiting_for_exercise, F.data.startswith("cex_"))
 async def process_const_exercise(c: types.CallbackQuery, state: FSMContext):
     d = await state.get_data()
     ex_name = CONSTRUCTOR_EXERCISES[d['chosen_muscle']][int(c.data.split("_")[1])]
@@ -915,7 +909,7 @@ async def process_const_exercise(c: types.CallbackQuery, state: FSMContext):
     await c.message.edit_text("Укажи число рабочих подходов:", reply_markup=b.as_markup())
     await state.set_state(ConstructorStates.waiting_for_sets)
 
-@dp.callback_query(F.data.startswith("csets_"))
+@dp.callback_query(ConstructorStates.waiting_for_sets, F.data.startswith("csets_"))
 async def process_const_sets(c: types.CallbackQuery, state: FSMContext):
     await state.update_data(chosen_sets=c.data.split("_")[1])
     b = InlineKeyboardBuilder()
@@ -924,7 +918,7 @@ async def process_const_sets(c: types.CallbackQuery, state: FSMContext):
     await c.message.edit_text("Выбери рабочий диапазон повторений:", reply_markup=b.as_markup())
     await state.set_state(ConstructorStates.waiting_for_reps)
 
-@dp.callback_query(F.data.startswith("creps_"))
+@dp.callback_query(ConstructorStates.waiting_for_reps, F.data.startswith("creps_"))
 async def process_const_reps(c: types.CallbackQuery, state: FSMContext):
     reps = c.data.split("_")[1]
     d = await state.get_data()
@@ -986,7 +980,7 @@ async def process_food_batch(message: types.Message, state: FSMContext):
 
 async def main():
     init_db()
-    if not API_TOKEN: sys.exit("[ОШИБКА]: BOT_TOKEN не найден в переменных окружения.")
+    if not API_TOKEN: sys.exit("[ОШИБКА]: BOT_TOKEN пуст! Задай переменную окружения на хостинге.")
     scheduler.start()
     update_scheduler_tasks()
     await dp.start_polling(bot)
