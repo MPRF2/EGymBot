@@ -23,7 +23,8 @@ logging.basicConfig(level=logging.INFO)
 API_TOKEN = os.getenv("BOT_TOKEN")
 # =========================================================
 
-DB_NAME = "/app/data/fitness_bot.db"
+# ИСПРАВЛЕНО: Изменили имя файла на v2, чтобы хостинг создал чистую БД с новой структурой
+DB_NAME = "/app/data/fitness_bot_v2.db"
 bot = Bot(token=API_TOKEN) if API_TOKEN else None
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
@@ -32,6 +33,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
+    # Здесь создаются ровно 16 колонок
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, 
@@ -99,7 +101,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === МАСШТАБИРОВАННАЯ БАЗА ДАННЫХ ПРОДУКТОВ ===
+# === БАЗА ДАННЫХ ПРОДУКТОВ ===
 FOOD_DATABASE = {
     "куриное филе грудка курица куриная грудка сырая": {"cals": 113, "prot": 23.6, "fats": 1.9, "carbs": 0.0, "cat": "Белки"},
     "куриная грудка запеченная готовая вареная": {"cals": 150, "prot": 30.0, "fats": 3.2, "carbs": 0.0, "cat": "Белки"},
@@ -179,7 +181,7 @@ FOOD_DATABASE = {
     "котлета куриная паровая": {"cals": 140, "prot": 18.0, "fats": 6.0, "carbs": 4.0, "piece_weight": 80, "cat": "Столовая"}
 }
 
-# === МАСШТАБИРОВАННАЯ БАЗА УПРАЖНЕНИЙ ===
+# === БАЗА УПРАЖНЕНИЙ ДЛЯ КОНСТРУКТОРА ===
 CONSTRUCTOR_EXERCISES = {
     "Грудь (Верхний пучок)": [
         "Жим штанги на наклонной скамье 30°", "Жим гантелей на наклонной скамье",
@@ -245,7 +247,7 @@ CONSTRUCTOR_EXERCISES = {
         "Подъем штанги на бицепс с EZ-грифом стоя", "Подъем гантелей на бицепс на наклонной скамье",
         "Сгибания Скотта с EZ-штангой / гантелью", "Молотковые сгибания с гантелями (Хаммер)",
         "Концентрированные сгибания рук с гантелью", "Подъем штанги на бицепс прямым грифом стоя",
-        "Сгибания рук в кроссовере у верхних блоков", "Сгибания 'Паук'",
+        "Сгибания рук в кроссовере у upper blocks", "Сгибания 'Паук'",
         "Подъем гантелей на бицепс стоя с супинацией", "Сгибания рук на нижнем блоке с канатом",
         "Сгибания рук в тренажере Скотта", "Молотковые сгибания с уводом руки вовнутрь (Cross Body)",
         "Подъем штанги на бицепс обратным хватом", "Сгибания Зоттмана с гантелями",
@@ -254,7 +256,7 @@ CONSTRUCTOR_EXERCISES = {
     "Руки (Трицепс)": [
         "Французский жим лежа со штангой / гантелями", "Разгибания рук на верхнем блоке с канатом",
         "Жим штанги узким хватом горизонтально", "Разгибание руки из-за головы с гантелью / блока",
-        "Отжимания на брусьях на triцепс (вертикально)", "Французский жим стоя с EZ-грифом из-за головы",
+        "Отжимания на брусьях на трицепс (вертикально)", "Французский жим стоя с EZ-грифом из-за головы",
         "Разгибания рук на блоке прямой рукоятью книзу", "Разгибания одной руки обратным хватом на блоке",
         "Кикбэк (Kickback) с гантелью в наклоне", "Отжимания от скамьи сзади (провалы)",
         "Калифорнийский жим штанги", "Разгибания рук с канатом из-за головы у нижнего блока",
@@ -379,11 +381,10 @@ class CalendarStates(StatesGroup):
 dp = Dispatcher(storage=MemoryStorage())
 
 # ==================== МОДУЛЬ РЕГИСТРАЦИИ (АНКЕТА) ====================
-
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Доброобраловать в фитнес-помощник!\nШаг 1: Введи рост в см:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Добро пожаловать в фитнес-помощник!\nШаг 1: Введи рост в см:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(RegistrationStates.waiting_for_height)
 
 @dp.message(RegistrationStates.waiting_for_height)
@@ -506,7 +507,6 @@ async def process_experience(message: types.Message, state: FSMContext):
     await message.answer("Шаг 11: Выбери цель текущего периода (обязательно):", reply_markup=b.as_markup())
     await state.set_state(RegistrationStates.waiting_for_goal)
 
-# ИСПРАВЛЕНО: Теперь ловим callback_query четко по тексту данных
 @dp.callback_query(F.data.startswith("goal_"))
 async def process_final_calculations(c: types.CallbackQuery, state: FSMContext):
     g = c.data.split("_")[1]
@@ -563,6 +563,8 @@ async def process_final_calculations(c: types.CallbackQuery, state: FSMContext):
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # Теперь здесь ровно 16 слотов под 16 колонок таблицы users!
     cursor.execute("""
         INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (c.from_user.id, height, weight, age, strength_workouts, body_fat, daily_steps, 
@@ -592,7 +594,7 @@ async def process_final_calculations(c: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await c.answer()
 
-# ==================== УПРАВЛЕНИЕ ПРОФИЛЕМ И КБЖУ ====================
+# ==================== УПРАВЛЕНИЕ ПРОФИЛЕМ ====================
 @dp.message(F.text == "📋 Мой профиль")
 async def view_profile(message: types.Message):
     conn = sqlite3.connect(DB_NAME)
@@ -630,7 +632,7 @@ async def clear_calories_callback(c: types.CallbackQuery):
     cursor.execute("INSERT OR REPLACE INTO daily_log VALUES (?, 0, 0, 0, 0)", (c.from_user.id,))
     conn.commit()
     conn.close()
-    await c.answer("Счетчик съеденных калорий сброшен на ноль!", show_alert=True)
+    await c.answer("Счетчик съеденных калорий сброшен!", show_alert=True)
     await view_profile(c.message)
 
 @dp.callback_query(F.data == "clear_profile")
@@ -642,7 +644,7 @@ async def clear_profile_callback(c: types.CallbackQuery, state: FSMContext):
     conn.commit()
     conn.close()
     await c.answer("Данные профиля удалены.", show_alert=True)
-    await c.message.answer("Твой профиль полностью очищен. Давай заполним его заново!\nВведи рост в см:", reply_markup=types.ReplyKeyboardRemove())
+    await c.message.answer("Профиль очищен. Давай заполним заново!\nВведи рост в см:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(RegistrationStates.waiting_for_height)
 
 # ==================== КАЛЕНДАРЬ ПИТАНИЯ ====================
@@ -674,7 +676,7 @@ async def cal_reset_all(c: types.CallbackQuery):
     conn.commit()
     conn.close()
     update_scheduler_tasks()
-    await c.answer("Все шаблоны и расписания удалены. Создан чистый 'Основной день'.", show_alert=True)
+    await c.answer("Календарь сброшен.", show_alert=True)
     await show_calendar_root(c.message)
 
 @dp.callback_query(F.data.startswith("calday_"))
@@ -796,7 +798,6 @@ async def save_new_day_template(message: types.Message, state: FSMContext):
     await message.answer("Шаблон добавлен!", reply_markup=get_main_keyboard())
     await state.clear()
 
-# ИСПРАВЛЕНО: Убрана неверная интерполяция {day_id} из строки фильтра фильтра
 @dp.callback_query(F.data.startswith("calactivate_"))
 async def act_day(c: types.CallbackQuery):
     d_id = int(c.data.split("_")[1])
@@ -865,7 +866,7 @@ async def clear_workout_split(c: types.CallbackQuery):
     cursor.execute("DELETE FROM workouts WHERE user_id = ?", (c.from_user.id,))
     conn.commit()
     conn.close()
-    await c.answer("Тренировочный сплит успешно полностью очищен!", show_alert=True)
+    await c.answer("Тренировочный сплит полностью очищен!", show_alert=True)
     await show_workout_menu(c.message)
 
 @dp.callback_query(F.data == "const_start")
@@ -962,7 +963,7 @@ async def process_food_batch(message: types.Message, state: FSMContext):
         found_summary.append(f"• {food_name.split()[0].capitalize()} {int(w)}г")
 
     if not found_summary:
-        await message.answer("❌ Продукты не найдены в базе. Проверь написание (например: курица, овсянка, семечки, яйца).", reply_markup=get_main_keyboard())
+        await message.answer("❌ Продукты не найдены в базе. Проверь написание (курица, овсянка, семечки, яйца).", reply_markup=get_main_keyboard())
         await state.clear()
         return
 
