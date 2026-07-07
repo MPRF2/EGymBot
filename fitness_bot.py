@@ -911,7 +911,7 @@ async def process_const_day(c: types.CallbackQuery, state: FSMContext):
     await state.update_data(chosen_day=c.data.split("_")[1])
     b = InlineKeyboardBuilder()
     
-    # ИСПРАВЛЕНО: Зашиваем в кнопку КРАТКИЙ ЛАТИНСКИЙ КЛЮЧ, чтобы callback_data гарантированно не превышал лимит в 64 байта
+    # КРАТКИЙ ЛАТИНСКИЙ КЛЮЧ предотвращает превышение лимита callback_data (64 байта)
     for key, data in CONSTRUCTOR_EXERCISES.items(): 
         b.button(text=data["name"], callback_data=f"cmuscle_{key}")
         
@@ -922,7 +922,7 @@ async def process_const_day(c: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(ConstructorStates.waiting_for_muscle, F.data.startswith("cmuscle_"))
 async def process_const_muscle(c: types.CallbackQuery, state: FSMContext):
-    muscle_key = c.data.split("_")[1] # Извлекаем латинский ключ группы (например, ch_top)
+    muscle_key = c.data.split("_")[1]
     await state.update_data(chosen_muscle=muscle_key)
     
     b = InlineKeyboardBuilder()
@@ -971,7 +971,6 @@ async def process_const_reps(c: types.CallbackQuery, state: FSMContext):
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Записываем в БД нормальное красивое русское название группы мышц
     cursor.execute("INSERT INTO workouts (user_id, day_of_week, exercise_name, muscle_group, sets, reps) VALUES (?, ?, ?, ?, ?, ?)",
                    (c.from_user.id, d['chosen_day'], d['chosen_ex_name'], d['chosen_muscle_real_name'], d['chosen_sets'], reps))
     conn.commit()
@@ -994,10 +993,12 @@ async def process_food_batch(message: types.Message, state: FSMContext):
     found_summary = []
     
     for part in parts:
-        part = part.strip().lower().replace(",", ".")
-        num_match = re.findall(r'[\d.]+', part)
+        part = part.strip().lower()
+        # Извлекаем числа до очистки букв, заменяя только запятую на точку в рамках этого фрагмента
+        num_match = re.findall(r'[\d.]+', part.replace(",", "."))
         if not num_match: continue
         val = float(num_match[0])
+        
         food_name, info = find_food_in_db(part)
         if not food_name: continue
         w = val * info.get("piece_weight", 100.0) if "шт" in part else val
