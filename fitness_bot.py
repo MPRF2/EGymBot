@@ -1047,9 +1047,12 @@ async def process_food_batch(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     
+    # Безопасное объединение строк БЕЗ использования бэкслеша внутри f-строки
+    summary_text = "\n".join(found_summary)
+    
     response_text = (
         f"➕ **Добавлено в дневник:**\n"
-        f"{'\n'.join(found_summary)}\n\n"
+        f"{summary_text}\n\n"
         f"🔥 **Итого за прием:**\n"
         f"▪️ Калории: `+{round(tc)}` ккал\n"
         f"▪️ Белки: `+{round(tp, 1)}`г | Жиры: `+{round(tj, 1)}`г | Углеводы: `+{round(tu, 1)}`г"
