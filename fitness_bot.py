@@ -1,7 +1,6 @@
 import os
 import re
 import sqlite3
-import difflib
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -19,7 +18,7 @@ dp = Dispatcher()
 
 DB_NAME = "fitness_bot.db"
 
-# ==================== СОСТОЯНИЯ FSM (АНКЕТА И БУДИЛЬНИКИ) ====================
+# ==================== СОСТОЯНИЯ FSM (АНКЕТА, БУДИЛЬНИКИ И КОНСТРУКТОР) ====================
 class RegistrationStates(StatesGroup):
     gender = State()
     age = State()
@@ -39,6 +38,12 @@ class FoodStates(StatesGroup):
 class AlarmStates(StatesGroup):
     waiting_for_meal_name = State()
     waiting_for_meal_time = State()
+
+class WorkoutStates(StatesGroup):
+    waiting_for_workout_name = State()   # Название тренировки (например: День 1)
+    waiting_for_exercise_select = State() # Выбор упражнения из инлайн-списка
+    waiting_for_sets = State()            # Количество подходов
+    waiting_for_reps = State()            # Количество повторений
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БД ====================
 def init_db():
@@ -67,6 +72,16 @@ def init_db():
             meal_name TEXT,
             meal_time TEXT,
             meal_type TEXT DEFAULT 'основной'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_workouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            workout_name TEXT,
+            exercise_name TEXT,
+            sets INTEGER,
+            reps TEXT
         )
     """)
     conn.commit()
@@ -346,6 +361,7 @@ async def clear_profile_handler(c: types.CallbackQuery):
     cursor.execute("DELETE FROM users WHERE user_id = ?", (c.from_user.id,))
     cursor.execute("DELETE FROM daily_log WHERE user_id = ?", (c.from_user.id,))
     cursor.execute("DELETE FROM user_meals WHERE user_id = ?", (c.from_user.id,))
+    cursor.execute("DELETE FROM user_workouts WHERE user_id = ?", (c.from_user.id,))
     conn.commit()
     conn.close()
     await c.message.edit_text("💥 Профиль сброшен. Для повторного заполнения анкеты отправь команду /start")
@@ -353,96 +369,39 @@ async def clear_profile_handler(c: types.CallbackQuery):
 @dp.callback_query(F.data == "inline_eat")
 async def inline_eat_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянки, 1.5 кг индейки, 3 шт яиц, 250 мл молока`):")
+    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе`):")
     await state.set_state(FoodStates.waiting_for_batch)
 
-# --- УЛУЧШЕННЫЙ ПОДСЧЕТ С ЛЮБЫМИ СКЛОНЕНИЯМИ И ЕДИНИЦАМИ ИЗМЕРЕНИЯ ---
 @dp.message(FoodStates.waiting_for_batch)
 async def process_batch_food(message: types.Message, state: FSMContext):
     await state.clear()
     raw_text = message.text.lower()
     added_cals, added_prot, added_fats, added_carbs = 0, 0, 0, 0
-    
     items = raw_text.split(",")
     
-    # Шаблон регулярного выражения: Число + Единица измерения + Любые падежные окончания букв + Название продукта[cite: 2]
-    pattern = re.compile(r"([0-9.,]+)\s*(г|гр|грамм|кг|килограмм|шт|штуки|ед|единиц|мл|миллилитр)[а-я]*\s+(.+)")
-
     for item in items:
         item = item.strip()
-        if not item:
-            continue
-            
-        match = pattern.match(item)
-        
-        if match:
-            raw_weight = match.group(1).replace(",", ".")
-            unit = match.group(2)
-            product_name = match.group(3).strip()
-            
+        weight = 100
+        if "г" in item:
+            parts = item.split("г")
             try:
-                weight = float(raw_weight)
-            except ValueError:
-                weight = 100
+                weight = float("".join(filter(lambda ch: ch.isdigit() or ch=='.', parts[0])))
+            except: weight = 100
+            product_name = parts[1].strip()
         else:
-            # Запасной разбор на случай отсутствия единиц измерения (например, "овсянка 100")[cite: 2]
-            digits = "".join(filter(lambda ch: ch.isdigit() or ch in ".,", item)).replace(",", ".")
-            product_name = "".join(filter(lambda ch: not ch.isdigit() and ch not in ".,", item)).strip()
-            unit = "г"
-            try:
-                weight = float(digits) if digits else 100
-            except ValueError:
-                weight = 100
-
-        # Убираем возможный мусор в конце имени продукта[cite: 2]
-        product_name = re.sub(r"\b(г|гр|грамм|кг|шт|ед|мл)\b", "", product_name).strip()
-
-        # Поиск наиболее близкого совпадения по ключам из FOOD_DATABASE[cite: 2]
-        db_keys = list(FOOD_DATABASE.keys())
-        best_matches = difflib.get_close_matches(product_name, db_keys, n=1, cutoff=0.4)[cite: 2]
-        
-        if not best_matches:
-            # Резервная проверка подстрок на случай сложных названий (например "курица" -> "куриное филе")[cite: 2]
-            for key in db_keys:
-                if key[:-2] in product_name or product_name[:-2] in key:
-                    best_matches = [key]
-                    break
-
-        if best_matches:
-            matched_key = best_matches[0]
-            data = FOOD_DATABASE[matched_key]
+            product_name = "".join(filter(lambda ch: not ch.isdigit(), item)).strip()
             
-            # Конвертер единиц измерения[cite: 2]
-            if unit in ["кг", "килограмм"]:
-                weight = weight * 1000  # Перевод кг в граммы[cite: 2]
-                
-            elif unit in ["шт", "штуки", "ед", "единиц"]:
-                # Подстановка примерных весов поштучных продуктов[cite: 2]
-                if "яйцо" in matched_key:
-                    weight = weight * 55[cite: 2]
-                elif "яичный белок" in matched_key:
-                    weight = weight * 35[cite: 2]
-                elif "картофель" in matched_key:
-                    weight = weight * 150[cite: 2]
-                elif "котлета" in matched_key:
-                    weight = weight * 80[cite: 2]
-                elif "бургер" in matched_key or "шаурма" in matched_key:
-                    weight = weight * 100[cite: 2]
-                else:
-                    weight = weight * 100  # Дефолт для неизвестных штук[cite: 2]
-            
-            elif unit in ["мл", "миллилитр"]:
-                pass  # Для жидких молочных продуктов 1 мл условно равен 1 г[cite: 2]
-                
-            coef = weight / 100.0[cite: 2]
-            
-            added_cals += data['cals'] * coef
-            added_prot += data['prot'] * coef
-            added_fats += data['fats'] * coef
-            added_carbs += data['carbs'] * coef
+        for db_name, data in FOOD_DATABASE.items():
+            if db_name in product_name:
+                coef = weight / 100.0
+                added_cals += data['cals'] * coef
+                added_prot += data['prot'] * coef
+                added_fats += data['fats'] * coef
+                added_carbs += data['carbs'] * coef
+                break
                 
     if added_cals == 0:
-        return await message.answer("❌ Бот не распознал продукты. Проверьте написание по кнопке «Menu еды в базе».")
+        return await message.answer("❌ Бот не распознал продукты. Проверьте написание по кнопке «Меню еды в базе».")
         
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -461,30 +420,196 @@ async def process_batch_food(message: types.Message, state: FSMContext):
         text, markup = generate_profile_interface(r, l)
         await message.answer(text, reply_markup=markup, parse_mode="Markdown")
 
-# --- КОНСТРУКТОР ТРЕНИРОВОК ---
+# --- ИНТЕРАКТИВНЫЙ КОНСТРУКТОР ТРЕНИРОВОК ---
 @dp.callback_query(F.data == "inline_workout")
-async def inline_workout_handler(c: types.CallbackQuery):
+async def inline_workout_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    text = "🏋️ **Конструктор плана тренировок**\n\nВыбери группу мышц для получения списка упражнений:"
+    await state.clear()
+    
+    text = (
+        "🏋️ **Конструктор планов тренировок**\n\n"
+        "Здесь ты можешь составить свои собственные тренировочные программы, указав рабочие подходы и повторения для каждого упражнения.\n\n"
+        "Выбери действие:"
+    )
     b = InlineKeyboardBuilder()
-    for category in EXERCISE_DATABASE.keys():
-        b.button(text=f"💪 {category}", callback_data=f"ex_cat_{category}")
+    b.button(text="➕ Создать / Добавить в тренировку", callback_data="workout_add_start")
+    b.button(text="📖 Посмотреть мои планы", callback_data="workout_view_my")
+    b.button(text="🗑️ Очистить все тренировки", callback_data="workout_clear_all")
     b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
-    b.adjust(2, 2, 2, 1)
+    b.adjust(1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
-@dp.callback_query(F.data.startswith("ex_cat_"))
-async def show_exercises_by_category(c: types.CallbackQuery):
+@dp.callback_query(F.data == "workout_clear_all")
+async def workout_clear_all_handler(c: types.CallbackQuery):
     await c.answer()
-    category = c.data.replace("ex_cat_", "")
-    exercises = EXERCISE_DATABASE.get(category, [])
-    text = f"🏋️ **15 лучших упражнений на группу «{category}»:**\n\n"
-    for idx, ex in enumerate(exercises, 1):
-        text += f"{idx}. {ex}\n"
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_workouts WHERE user_id = ?", (c.from_user.id,))
+    conn.commit()
+    conn.close()
+    
+    b = InlineKeyboardBuilder().button(text="🔄 В конструктор", callback_data="inline_workout")
+    await c.message.edit_text("💥 Все твои тренировочные планы успешно удалены.", reply_markup=b.as_markup())
+
+@dp.callback_query(F.data == "workout_add_start")
+async def workout_add_start(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT workout_name FROM user_workouts WHERE user_id = ?", (c.from_user.id,))
+    existing = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    
+    text = "✏️ **Введите название тренировки** (например: `День 1: Пуш` или `Ноги/Плечи`):\n\n"
     b = InlineKeyboardBuilder()
-    b.button(text="🔄 К выбору категорий", callback_data="inline_workout")
-    b.button(text="⬅️ В профиль", callback_data="back_to_profile")
-    b.adjust(1, 1)
+    
+    if existing:
+        text += "Или выберите уже существующую программу ниже, чтобы добавить в неё новые упражнения:"
+        for w_name in existing:
+            b.button(text=w_name, callback_data=f"w_select_{w_name}")
+            
+    b.button(text="⬅️ Отмена", callback_data="inline_workout")
+    b.adjust(1)
+    
+    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    await state.set_state(WorkoutStates.waiting_for_workout_name)
+
+@dp.callback_query(WorkoutStates.waiting_for_workout_name, F.data.startswith("w_select_"))
+async def workout_name_selected_btn(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    w_name = c.data.replace("w_select_", "")
+    await state.update_data(workout_name=w_name)
+    await show_categories_for_workout(c.message, state)
+
+@dp.message(WorkoutStates.waiting_for_workout_name)
+async def workout_name_input_text(message: types.Message, state: FSMContext):
+    w_name = message.text.strip()
+    await state.update_data(workout_name=w_name)
+    
+    b = InlineKeyboardBuilder().button(text="➡️ Перейти к выбору мышц", callback_data="w_go_categories")
+    await message.answer(f"Вы создаете план: **{w_name}**", reply_markup=b.as_markup(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "w_go_categories")
+async def w_go_categories_btn(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    await show_categories_for_workout(c.message, state)
+
+async def show_categories_for_workout(message: types.Message, state: FSMContext):
+    text = "💪 **Выбери группу мышц для получения списка упражнений:**"
+    b = InlineKeyboardBuilder()
+    for category in EXERCISE_DATABASE.keys():
+        b.button(text=f"💪 {category}", callback_data=f"w_cat_{category}")
+    b.button(text="⬅️ Отмена", callback_data="inline_workout")
+    b.adjust(2, 2, 2, 1)
+    await message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    await state.set_state(WorkoutStates.waiting_for_exercise_select)
+
+@dp.callback_query(WorkoutStates.waiting_for_exercise_select, F.data.startswith("w_cat_"))
+async def show_exercises_inline(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    category = c.data.replace("w_cat_", "")
+    exercises = EXERCISE_DATABASE.get(category, [])
+    
+    text = f"🏋️ **Выбери упражнение из категории «{category}»:**"
+    b = InlineKeyboardBuilder()
+    
+    for idx, ex in enumerate(exercises):
+        b.button(text=ex, callback_data=f"w_ex_{category}_{idx}")
+        
+    b.button(text="🔄 К выбору категорий", callback_data="w_back_to_cats")
+    b.adjust(1)
+    await c.message.edit_text(text, reply_markup=b.as_markup())
+
+@dp.callback_query(WorkoutStates.waiting_for_exercise_select, F.data == "w_back_to_cats")
+async def w_back_to_cats_handler(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    await show_categories_for_workout(c.message, state)
+
+@dp.callback_query(WorkoutStates.waiting_for_exercise_select, F.data.startswith("w_ex_"))
+async def exercise_selected(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    parts = c.data.replace("w_ex_", "").split("_")
+    category = parts[0]
+    idx = int(parts[1])
+    
+    ex_name = EXERCISE_DATABASE[category][idx]
+    await state.update_data(exercise_name=ex_name)
+    
+    await c.message.edit_text(f"📋 Выбрано: **{ex_name}**\n\n✏️ Введи количество **рабочих подходов** (число, например: `4`):", parse_mode="Markdown")
+    await state.set_state(WorkoutStates.waiting_for_sets)
+
+@dp.message(WorkoutStates.waiting_for_sets)
+async def process_workout_sets(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        return await message.answer("Пожалуйста, введи именно число подходов (например, 3 или 4):")
+        
+    await state.update_data(sets=int(message.text))
+    await message.answer("✏️ Теперь укажи **количество повторений** или рабочий диапазон (например: `8-12` или `10`):")
+    await state.set_state(WorkoutStates.waiting_for_reps)
+
+@dp.message(WorkoutStates.waiting_for_reps)
+async def process_workout_reps(message: types.Message, state: FSMContext):
+    reps_text = message.text.strip()
+    data = await state.get_data()
+    await state.clear()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_workouts (user_id, workout_name, exercise_name, sets, reps)
+        VALUES (?, ?, ?, ?, ?)
+    """, (message.from_user.id, data['workout_name'], data['exercise_name'], data['sets'], reps_text))
+    conn.commit()
+    conn.close()
+    
+    text = (
+        f"✅ **Упражнение добавлено в твой тренировочный план!**\n\n"
+        f"📋 Программа: *{data['workout_name']}*\n"
+        f"💪 Упражнение: *{data['exercise_name']}*\n"
+        f"🔢 Нагрузка: *{data['sets']} подходов х {reps_text} повторений*\n"
+    )
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Добавить еще одно упражнение", callback_data=f"w_select_{data['workout_name']}")
+    b.button(text="📖 Посмотреть получившийся план", callback_data="workout_view_my")
+    b.button(text="⬅️ В главное меню конструктора", callback_data="inline_workout")
+    b.adjust(1)
+    
+    await message.answer(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "workout_view_my")
+async def workout_view_my_handler(c: types.CallbackQuery):
+    await c.answer()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT workout_name, exercise_name, sets, reps FROM user_workouts WHERE user_id = ? ORDER BY id ASC", (c.from_user.id,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        b = InlineKeyboardBuilder()
+        b.button(text="➕ Создать тренировку", callback_data="workout_add_start")
+        b.button(text="⬅️ Назад", callback_data="inline_workout")
+        return await c.message.edit_text("😢 У тебя пока нет сохраненных упражнений в планах.", reply_markup=b.as_markup())
+        
+    programs = {}
+    for r in rows:
+        w_name, ex_name, sets, reps = r[0], r[1], r[2], r[3]
+        if w_name not in programs:
+            programs[w_name] = []
+        programs[w_name].append(f"  ▫️ {ex_name} — *{sets}х{reps}*")
+        
+    text = "📋 **Твои персональные тренировочные планы:**\n\n"
+    for w_name, exercises in programs.items():
+        text += f"🏋️‍♂️ **Программа: {w_name}**\n" + "\n".join(exercises) + "\n\n"
+        
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Добавить еще упражнение", callback_data="workout_add_start")
+    b.button(text="⬅️ Назад в конструктор", callback_data="inline_workout")
+    b.adjust(1)
+    
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
 # --- ПРОСМОТР МЕНЮ ЕДЫ ---
