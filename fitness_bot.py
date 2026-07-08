@@ -354,39 +354,77 @@ async def clear_profile_handler(c: types.CallbackQuery):
 @dp.callback_query(F.data == "inline_eat")
 async def inline_eat_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе`):")
+    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе готовое`):")
     await state.set_state(FoodStates.waiting_for_batch)
 
+# ИНТЕГРИРОВАНО ИЗ ПЕРВОГО ФАЙЛА: Улучшенный обработчик ввода продуктов
 @dp.message(FoodStates.waiting_for_batch)
 async def process_batch_food(message: types.Message, state: FSMContext):
     await state.clear()
     raw_text = message.text.lower()
     added_cals, added_prot, added_fats, added_carbs = 0, 0, 0, 0
     items = raw_text.split(",")
+    recognized_products = []
     
     for item in items:
         item = item.strip()
-        weight = 100
-        if "г" in item:
-            parts = item.split("г")
-            try:
-                weight = float("".join(filter(lambda ch: ch.isdigit() or ch=='.', parts[0])))
-            except: weight = 100
-            product_name = parts[1].strip()
-        else:
-            product_name = "".join(filter(lambda ch: not ch.isdigit(), item)).strip()
+        if not item:
+            continue
             
-        for db_name, data in FOOD_DATABASE.items():
-            if db_name in product_name:
-                coef = weight / 100.0
-                added_cals += data['cals'] * coef
-                added_prot += data['prot'] * coef
-                added_fats += data['fats'] * coef
-                added_carbs += data['carbs'] * coef
+        weight = 100
+        product_name = item
+        
+        # Регулярное выражение ищет цифры (включая точки/запятые) перед буквой 'г'
+        weight_match = re.search(r'(\d+[.,]?\d*)\s*г', item)
+        if weight_match:
+            try:
+                weight = float(weight_match.group(1).replace(",", "."))
+            except ValueError:
+                weight = 100
+            # Отрезаем часть с граммами, оставляя только название продукта
+            product_name = item.replace(weight_match.group(0), "").strip()
+        else:
+            # Если "г" не написано, но есть цифры в начале строки (например "150 овсянки")
+            digit_match = re.match(r'^(\d+[.,]?\d*)', item)
+            if digit_match:
+                try:
+                    weight = float(digit_match.group(1).replace(",", "."))
+                except ValueError:
+                    weight = 100
+                product_name = item.replace(digit_match.group(0), "").strip()
+            else:
+                # Если цифр вообще нет, убираем лишние символы
+                product_name = "".join(filter(lambda ch: not ch.isdigit(), item)).strip()
+
+        # Очищаем имя от лишних предлогов/мусора на конце для более точного сопоставления
+        product_name = re.sub(r'^(из|при|приготовленного|сырого)\s+', '', product_name)
+
+        # Умный поиск по алиасам (падежам и склонениям)
+        found = False
+        for internal_name, data in FOOD_DATABASE.items():
+            for alias in data['aliases']:
+                # Проверяем, содержится ли корень/алиас в строке пользователя, или наоборот
+                if alias in product_name or product_name in alias:
+                    coef = weight / 100.0
+                    added_cals += data['cals'] * coef
+                    added_prot += data['prot'] * coef
+                    added_fats += data['fats'] * coef
+                    added_carbs += data['carbs'] * coef
+                    
+                    # Красивое имя для отчета пользователю
+                    display_name = internal_name.replace("_", " ").capitalize()
+                    recognized_products.append(f"• {display_name} ({round(weight)}г)")
+                    found = True
+                    break
+            if found:
                 break
                 
     if added_cals == 0:
-        return await message.answer("❌ Бот не распознал продукты. Проверьте написание по кнопке «Меню еды в базе».")
+        return await message.answer(
+            "❌ Бот не распознал ни один из продуктов.\n"
+            "Попробуйте написать проще, например: `100г овсянка, 200г куриное филе готовое`.\n"
+            "Список доступных слов смотрите по кнопке «📖 Меню еды в базе»."
+        )
         
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -398,8 +436,12 @@ async def process_batch_food(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    await message.answer(f"✅ Добавлено: +{round(added_cals)} ккал (Б:{round(added_prot,1)} | Ж:{round(added_fats,1)} | У:{round(added_carbs,1)})")
+    report = "✅ **Успешно добавлено:**\n" + "\n".join(recognized_products) + "\n\n"
+    report += f"📊 **Итого КБЖУ:** +{round(added_cals)} ккал (Б:{round(added_prot,1)}г | Ж:{round(added_fats,1)}г | У:{round(added_carbs,1)}г)"
     
+    await message.answer(report, parse_mode="Markdown")
+    
+    # Возвращаем интерфейс профиля
     r, l = await get_profile_data(message.from_user.id)
     if r:
         text, markup = generate_profile_interface(r, l)
@@ -672,7 +714,7 @@ async def meal_auto_generate_handler(c: types.CallbackQuery):
         "Расписание сбалансировано для стабильного удержания азотистого баланса и высокого анаболизма:\n\n"
         "🍳 *Завтрак* — ⏰ 08:30 (Напоминание в 08:00)\n"
         "🍗 *Обед* — ⏰ 13:00 (Напоминание в 12:30)\n"
-        "🍌 *Полдник* — ⏰ 16:30 (Напоминание in 16:00)\n"
+        "🍌 *Полдник* — ⏰ 16:30 (Напоминание в 16:00)\n"
         "🐟 *Ужин* — ⏰ 20:00 (Напоминание в 19:30)\n\n"
         "Вы можете в любой момент изменить или сбросить этот план."
     )
@@ -720,7 +762,6 @@ async def calc_diet_menu_handler(c: types.CallbackQuery):
     b.adjust(1, 1, 1, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
-# ИСПРАВЛЕНО И ИНТЕГРИРОВАНО: Хэндлер динамического перерасчета граммовок
 @dp.callback_query(F.data.startswith("diet_tier_"))
 async def process_diet_tier(c: types.CallbackQuery):
     await c.answer()
@@ -753,26 +794,21 @@ async def process_diet_tier(c: types.CallbackQuery):
         tier_title = "Бюджетный индивидуальный рацион"
         
         # 1. Завтрак: Овсянка + Цельные яйца
-        # Овсянка (на 100г): Б=12, Ж=6, У=62 | Яйцо (1 шт ~ 55г): Б=6.5, Ж=5.5, У=0.5
         oats_weight = round((c_meal / 62) * 100)
         oats_prot = (oats_weight * 12) / 100
         eggs_count = max(1, round((p_meal - oats_prot) / 6.5))
         
         # 2. Обед: Куриное филе + Гречка
-        # Гречка (на 100г): Б=12.5, Ж=3.3, У=62 | Филе (на 100г): Б=23, Ж=2, У=0
         buckwheat_weight = round((c_meal / 62) * 100)
         buckwheat_prot = (buckwheat_weight * 12.5) / 100
         chicken_weight_lunch = round((max(10, p_meal - buckwheat_prot) / 23) * 100)
         
         # 3. Полдник: Жидкий яичный белок + Подсолнечные семечки
-        # Семечки (на 100г): Б=20.7, Ж=52.9, У=3.4 | Яичный белок (на 100г): Б=11, Ж=0, У=0
-        # Выдаем жиры сразу за 2 приема (полдник + ужин), чтобы порция семечек была адекватной
         seeds_weight = round(((f_meal * 2) / 52.9) * 100)
         seeds_prot = (seeds_weight * 20.7) / 100
         egg_whites_weight = round((max(10, p_meal - seeds_prot) / 11) * 100)
         
-        # 4. Ужин: Филе Минтая + Рис (переносим остаток углеводов с полдника сюда)
-        # Рис (на 100г): Б=7, Ж=1, У=78 | Минтай (на 100г): Б=16, Ж=1, У=0
+        # 4. Ужин: Филе Минтая + Рис
         rice_weight = round(((c_meal * 2) / 78) * 100)
         rice_prot = (rice_weight * 7) / 100
         fish_weight = round((max(10, p_meal - rice_prot) / 16) * 100)
@@ -799,25 +835,21 @@ async def process_diet_tier(c: types.CallbackQuery):
         tier_title = "Стандартный индивидуальный рацион"
         
         # 1. Завтрак: Творог 5% + Овсянка
-        # Творог 5% (на 100г): Б=16, Ж=5, У=3
         oats_weight = round((c_meal / 62) * 100)
         oats_prot = (oats_weight * 12) / 100
         cottage_cheese = round((max(10, p_meal - oats_prot) / 16) * 100)
         
         # 2. Обед: Филе индейки + Рис + Оливковое масло
-        # Индейка (на 100г): Б=22, Ж=2, У=0 | Масло (на 100г): Ж=99.9
         rice_weight = round((c_meal / 78) * 100)
         rice_prot = (rice_weight * 7) / 100
         turkey_weight = round((max(10, p_meal - rice_prot) / 22) * 100)
         oil_lunch = round((f_meal / 99.9) * 100)
         
         # 3. Полдник: Банан + Сывороточный протеин
-        # Банан (1 шт средний ~ 22г углей) | Протеин (1 порция 30г ~ 24г белка)
         banana_count = max(1, round(c_meal / 21.8))
         protein_scoops = round(p_meal / 24, 1)
         
         # 4. Ужин: Куриное филе + Макароны тв. сортов + Оливковое масло
-        # Макароны (на 100г): Б=12, Ж=1.5, У=70
         pasta_weight = round((c_meal / 70) * 100)
         pasta_prot = (pasta_weight * 12) / 100
         chicken_weight_dinner = round((max(10, p_meal - pasta_prot) / 23) * 100)
@@ -847,26 +879,22 @@ async def process_diet_tier(c: types.CallbackQuery):
         tier_title = "Дорогой индивидуальный рацион"
         
         # 1. Завтрак: Красная рыба + Авокадо + Тосты
-        # Семга (на 100г): Б=20, Ж=15, У=0 | Авокадо (на 100г): Б=2, Ж=15, У=6 | Хлеб (на 100г): У=50
         salmon_weight = round((p_meal / 20) * 100)
         salmon_fats = (salmon_weight * 15) / 100
         avocado_weight = round((max(5, (f_meal * 2) - salmon_fats) / 15) * 100)
         bread_weight = round((c_meal / 50) * 100)
         
         # 2. Обед: Постная говядина + Киноа
-        # Говядина (на 100г): Б=22, Ж=7, У=0 | Киноа (на 100г): Б=14, Ж=6, У=57
         quinoa_weight = round((c_meal / 57) * 100)
         quinoa_prot = (quinoa_weight * 14) / 100
         beef_weight = round((max(10, p_meal - quinoa_prot) / 22) * 100)
         
         # 3. Полдник: Орехи Кешью + Греческий йогурт 0%
-        # Кешью (на 100г): Б=18, Ж=48, У=22 | Йогурт (на 100г): Б=10, Ж=0, У=4
         cashew_weight = round((f_meal / 48) * 100)
         cashew_prot = (cashew_weight * 18) / 100
         yogurt_weight = round((max(10, p_meal - cashew_prot) / 10) * 100)
         
         # 4. Ужин: Тигровые креветки + Бурый рис
-        # Креветки (на 100г): Б=22, Ж=1, У=0 | Бурый рис (на 100г): Б=7, Ж=2, У=72
         rice_brown_weight = round((c_meal / 72) * 100)
         rice_brown_prot = (rice_brown_weight * 7) / 100
         shrimps_weight = round((max(10, p_meal - rice_brown_prot) / 22) * 100)
@@ -887,7 +915,7 @@ async def process_diet_tier(c: types.CallbackQuery):
             f"• **{rice_brown_weight} г** Бурого нешлифованного риса\n"
         )
 
-    # Собираем итоговое сообщение плана питания с обновленной строкой заголовка
+    # Собираем итоговое сообщение плана питания
     text = (
         f"📖 *Меню еды в базе: {tier_title}*\n"
         f"🎯 _План составлен строго под твои суточные лимиты:_\n"
@@ -898,7 +926,6 @@ async def process_diet_tier(c: types.CallbackQuery):
         f"⚠️ **Важно:** Вес всех крупы, макарон, мяса и рыбы указан исключительно в **сухом / сыром виде** (до готовки)!"
     )
     
-    # Сборка инлайн-клавиатуры
     b = InlineKeyboardBuilder()
     b.button(text="🔄 Изменить продуктовую корзину", callback_data="calc_diet_menu")
     b.button(text="⬅️ Вернуться в профиль", callback_data="back_to_profile")
@@ -919,5 +946,4 @@ async def back_to_profile_handler(c: types.CallbackQuery):
 
 # ==================== ЗАПУСК БОТА ====================
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(dp.start_polling(bot))
