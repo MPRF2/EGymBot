@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import difflib
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -352,39 +353,96 @@ async def clear_profile_handler(c: types.CallbackQuery):
 @dp.callback_query(F.data == "inline_eat")
 async def inline_eat_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе`):")
+    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянки, 1.5 кг индейки, 3 шт яиц, 250 мл молока`):")
     await state.set_state(FoodStates.waiting_for_batch)
 
+# --- УЛУЧШЕННЫЙ ПОДСЧЕТ С ЛЮБЫМИ СКЛОНЕНИЯМИ И ЕДИНИЦАМИ ИЗМЕРЕНИЯ ---
 @dp.message(FoodStates.waiting_for_batch)
 async def process_batch_food(message: types.Message, state: FSMContext):
     await state.clear()
     raw_text = message.text.lower()
     added_cals, added_prot, added_fats, added_carbs = 0, 0, 0, 0
+    
     items = raw_text.split(",")
     
+    # Шаблон регулярного выражения: Число + Единица измерения + Любые падежные окончания букв + Название продукта[cite: 2]
+    pattern = re.compile(r"([0-9.,]+)\s*(г|гр|грамм|кг|килограмм|шт|штуки|ед|единиц|мл|миллилитр)[а-я]*\s+(.+)")
+
     for item in items:
         item = item.strip()
-        weight = 100
-        if "г" in item:
-            parts = item.split("г")
-            try:
-                weight = float("".join(filter(lambda ch: ch.isdigit() or ch=='.', parts[0])))
-            except: weight = 100
-            product_name = parts[1].strip()
-        else:
-            product_name = "".join(filter(lambda ch: not ch.isdigit(), item)).strip()
+        if not item:
+            continue
             
-        for db_name, data in FOOD_DATABASE.items():
-            if db_name in product_name:
-                coef = weight / 100.0
-                added_cals += data['cals'] * coef
-                added_prot += data['prot'] * coef
-                added_fats += data['fats'] * coef
-                added_carbs += data['carbs'] * coef
-                break
+        match = pattern.match(item)
+        
+        if match:
+            raw_weight = match.group(1).replace(",", ".")
+            unit = match.group(2)
+            product_name = match.group(3).strip()
+            
+            try:
+                weight = float(raw_weight)
+            except ValueError:
+                weight = 100
+        else:
+            # Запасной разбор на случай отсутствия единиц измерения (например, "овсянка 100")[cite: 2]
+            digits = "".join(filter(lambda ch: ch.isdigit() or ch in ".,", item)).replace(",", ".")
+            product_name = "".join(filter(lambda ch: not ch.isdigit() and ch not in ".,", item)).strip()
+            unit = "г"
+            try:
+                weight = float(digits) if digits else 100
+            except ValueError:
+                weight = 100
+
+        # Убираем возможный мусор в конце имени продукта[cite: 2]
+        product_name = re.sub(r"\b(г|гр|грамм|кг|шт|ед|мл)\b", "", product_name).strip()
+
+        # Поиск наиболее близкого совпадения по ключам из FOOD_DATABASE[cite: 2]
+        db_keys = list(FOOD_DATABASE.keys())
+        best_matches = difflib.get_close_matches(product_name, db_keys, n=1, cutoff=0.4)[cite: 2]
+        
+        if not best_matches:
+            # Резервная проверка подстрок на случай сложных названий (например "курица" -> "куриное филе")[cite: 2]
+            for key in db_keys:
+                if key[:-2] in product_name or product_name[:-2] in key:
+                    best_matches = [key]
+                    break
+
+        if best_matches:
+            matched_key = best_matches[0]
+            data = FOOD_DATABASE[matched_key]
+            
+            # Конвертер единиц измерения[cite: 2]
+            if unit in ["кг", "килограмм"]:
+                weight = weight * 1000  # Перевод кг в граммы[cite: 2]
+                
+            elif unit in ["шт", "штуки", "ед", "единиц"]:
+                # Подстановка примерных весов поштучных продуктов[cite: 2]
+                if "яйцо" in matched_key:
+                    weight = weight * 55[cite: 2]
+                elif "яичный белок" in matched_key:
+                    weight = weight * 35[cite: 2]
+                elif "картофель" in matched_key:
+                    weight = weight * 150[cite: 2]
+                elif "котлета" in matched_key:
+                    weight = weight * 80[cite: 2]
+                elif "бургер" in matched_key or "шаурма" in matched_key:
+                    weight = weight * 100[cite: 2]
+                else:
+                    weight = weight * 100  # Дефолт для неизвестных штук[cite: 2]
+            
+            elif unit in ["мл", "миллилитр"]:
+                pass  # Для жидких молочных продуктов 1 мл условно равен 1 г[cite: 2]
+                
+            coef = weight / 100.0[cite: 2]
+            
+            added_cals += data['cals'] * coef
+            added_prot += data['prot'] * coef
+            added_fats += data['fats'] * coef
+            added_carbs += data['carbs'] * coef
                 
     if added_cals == 0:
-        return await message.answer("❌ Бот не распознал продукты. Проверьте написание по кнопке «Меню еды в базе».")
+        return await message.answer("❌ Бот не распознал продукты. Проверьте написание по кнопке «Menu еды в базе».")
         
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
