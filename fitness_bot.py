@@ -1,6 +1,8 @@
 import os
 import re
+import math
 import sqlite3
+import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -18,7 +20,7 @@ dp = Dispatcher()
 
 DB_NAME = "fitness_bot.db"
 
-# ==================== СОСТОЯНИЯ FSM (АНКЕТА, БУДИЛЬНИКИ И КОНСТРУКТОР) ====================
+# ==================== СОСТОЯНИЯ FSM (АНКЕТА И БУДИЛЬНИКИ) ====================
 class RegistrationStates(StatesGroup):
     gender = State()
     age = State()
@@ -38,12 +40,6 @@ class FoodStates(StatesGroup):
 class AlarmStates(StatesGroup):
     waiting_for_meal_name = State()
     waiting_for_meal_time = State()
-
-class WorkoutStates(StatesGroup):
-    waiting_for_workout_name = State()   # Название тренировки (например: День 1)
-    waiting_for_exercise_select = State() # Выбор упражнения из инлайн-списка
-    waiting_for_sets = State()            # Количество подходов
-    waiting_for_reps = State()            # Количество повторений
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БД ====================
 def init_db():
@@ -72,16 +68,6 @@ def init_db():
             meal_name TEXT,
             meal_time TEXT,
             meal_type TEXT DEFAULT 'основной'
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_workouts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            workout_name TEXT,
-            exercise_name TEXT,
-            sets INTEGER,
-            reps TEXT
         )
     """)
     conn.commit()
@@ -319,7 +305,7 @@ async def get_profile_data(user_id: int):
     conn.close()
     return r, l
 
-@dp.message(F.text == "📋 Мой профиль")
+@dp.message(F.text.endswith("Мой профиль"))
 async def profile_menu_msg(message: types.Message):
     r, l = await get_profile_data(message.from_user.id)
     if not r:
@@ -346,7 +332,7 @@ def generate_profile_interface(r, l):
     b.button(text="🗑️ Сбросить профиль", callback_data="clear_profile")
     b.button(text="🍽️ Подсчет КБЖУ", callback_data="inline_eat")
     b.button(text="🏋️ Конструктор тренировок", callback_data="inline_workout")
-    b.button(text="📖 Menu еды в базе", callback_data="view_food_db")
+    b.button(text="📖 Меню еды в базе", callback_data="view_food_db")
     b.button(text="📅 Календарь приема пищи", callback_data="food_calendar")
     b.button(text="🍎 Рассчитать рацион питания", callback_data="calc_diet_menu")
     b.adjust(2, 2, 1, 1)
@@ -361,7 +347,6 @@ async def clear_profile_handler(c: types.CallbackQuery):
     cursor.execute("DELETE FROM users WHERE user_id = ?", (c.from_user.id,))
     cursor.execute("DELETE FROM daily_log WHERE user_id = ?", (c.from_user.id,))
     cursor.execute("DELETE FROM user_meals WHERE user_id = ?", (c.from_user.id,))
-    cursor.execute("DELETE FROM user_workouts WHERE user_id = ?", (c.from_user.id,))
     conn.commit()
     conn.close()
     await c.message.edit_text("💥 Профиль сброшен. Для повторного заполнения анкеты отправь команду /start")
@@ -420,196 +405,30 @@ async def process_batch_food(message: types.Message, state: FSMContext):
         text, markup = generate_profile_interface(r, l)
         await message.answer(text, reply_markup=markup, parse_mode="Markdown")
 
-# --- ИНТЕРАКТИВНЫЙ КОНСТРУКТОР ТРЕНИРОВОК ---
+# --- КОНСТРУКТОР ТРЕНИРОВОК ---
 @dp.callback_query(F.data == "inline_workout")
-async def inline_workout_handler(c: types.CallbackQuery, state: FSMContext):
+async def inline_workout_handler(c: types.CallbackQuery):
     await c.answer()
-    await state.clear()
-    
-    text = (
-        "🏋️ **Конструктор планов тренировок**\n\n"
-        "Здесь ты можешь составить свои собственные тренировочные программы, указав рабочие подходы и повторения для каждого упражнения.\n\n"
-        "Выбери действие:"
-    )
-    b = InlineKeyboardBuilder()
-    b.button(text="➕ Создать / Добавить в тренировку", callback_data="workout_add_start")
-    b.button(text="📖 Посмотреть мои планы", callback_data="workout_view_my")
-    b.button(text="🗑️ Очистить все тренировки", callback_data="workout_clear_all")
-    b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
-    b.adjust(1)
-    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "workout_clear_all")
-async def workout_clear_all_handler(c: types.CallbackQuery):
-    await c.answer()
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM user_workouts WHERE user_id = ?", (c.from_user.id,))
-    conn.commit()
-    conn.close()
-    
-    b = InlineKeyboardBuilder().button(text="🔄 В конструктор", callback_data="inline_workout")
-    await c.message.edit_text("💥 Все твои тренировочные планы успешно удалены.", reply_markup=b.as_markup())
-
-@dp.callback_query(F.data == "workout_add_start")
-async def workout_add_start(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT workout_name FROM user_workouts WHERE user_id = ?", (c.from_user.id,))
-    existing = [r[0] for r in cursor.fetchall()]
-    conn.close()
-    
-    text = "✏️ **Введите название тренировки** (например: `День 1: Пуш` или `Ноги/Плечи`):\n\n"
-    b = InlineKeyboardBuilder()
-    
-    if existing:
-        text += "Или выберите уже существующую программу ниже, чтобы добавить в неё новые упражнения:"
-        for w_name in existing:
-            b.button(text=w_name, callback_data=f"w_select_{w_name}")
-            
-    b.button(text="⬅️ Отмена", callback_data="inline_workout")
-    b.adjust(1)
-    
-    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
-    await state.set_state(WorkoutStates.waiting_for_workout_name)
-
-@dp.callback_query(WorkoutStates.waiting_for_workout_name, F.data.startswith("w_select_"))
-async def workout_name_selected_btn(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    w_name = c.data.replace("w_select_", "")
-    await state.update_data(workout_name=w_name)
-    await show_categories_for_workout(c.message, state)
-
-@dp.message(WorkoutStates.waiting_for_workout_name)
-async def workout_name_input_text(message: types.Message, state: FSMContext):
-    w_name = message.text.strip()
-    await state.update_data(workout_name=w_name)
-    
-    b = InlineKeyboardBuilder().button(text="➡️ Перейти к выбору мышц", callback_data="w_go_categories")
-    await message.answer(f"Вы создаете план: **{w_name}**", reply_markup=b.as_markup(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "w_go_categories")
-async def w_go_categories_btn(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    await show_categories_for_workout(c.message, state)
-
-async def show_categories_for_workout(message: types.Message, state: FSMContext):
-    text = "💪 **Выбери группу мышц для получения списка упражнений:**"
+    text = "🏋️ **Конструктор плана тренировок**\n\nВыбери группу мышц для получения списка упражнений:"
     b = InlineKeyboardBuilder()
     for category in EXERCISE_DATABASE.keys():
-        b.button(text=f"💪 {category}", callback_data=f"w_cat_{category}")
-    b.button(text="⬅️ Отмена", callback_data="inline_workout")
+        b.button(text=f"💪 {category}", callback_data=f"ex_cat_{category}")
+    b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
     b.adjust(2, 2, 2, 1)
-    await message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
-    await state.set_state(WorkoutStates.waiting_for_exercise_select)
+    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
-@dp.callback_query(WorkoutStates.waiting_for_exercise_select, F.data.startswith("w_cat_"))
-async def show_exercises_inline(c: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.startswith("ex_cat_"))
+async def show_exercises_by_category(c: types.CallbackQuery):
     await c.answer()
-    category = c.data.replace("w_cat_", "")
+    category = c.data.replace("ex_cat_", "")
     exercises = EXERCISE_DATABASE.get(category, [])
-    
-    text = f"🏋️ **Выбери упражнение из категории «{category}»:**"
+    text = f"🏋️ **15 лучших упражнений на группу «{category}»:**\n\n"
+    for idx, ex in enumerate(exercises, 1):
+        text += f"{idx}. {ex}\n"
     b = InlineKeyboardBuilder()
-    
-    for idx, ex in enumerate(exercises):
-        b.button(text=ex, callback_data=f"w_ex_{category}_{idx}")
-        
-    b.button(text="🔄 К выбору категорий", callback_data="w_back_to_cats")
-    b.adjust(1)
-    await c.message.edit_text(text, reply_markup=b.as_markup())
-
-@dp.callback_query(WorkoutStates.waiting_for_exercise_select, F.data == "w_back_to_cats")
-async def w_back_to_cats_handler(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    await show_categories_for_workout(c.message, state)
-
-@dp.callback_query(WorkoutStates.waiting_for_exercise_select, F.data.startswith("w_ex_"))
-async def exercise_selected(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    parts = c.data.replace("w_ex_", "").split("_")
-    category = parts[0]
-    idx = int(parts[1])
-    
-    ex_name = EXERCISE_DATABASE[category][idx]
-    await state.update_data(exercise_name=ex_name)
-    
-    await c.message.edit_text(f"📋 Выбрано: **{ex_name}**\n\n✏️ Введи количество **рабочих подходов** (число, например: `4`):", parse_mode="Markdown")
-    await state.set_state(WorkoutStates.waiting_for_sets)
-
-@dp.message(WorkoutStates.waiting_for_sets)
-async def process_workout_sets(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.answer("Пожалуйста, введи именно число подходов (например, 3 или 4):")
-        
-    await state.update_data(sets=int(message.text))
-    await message.answer("✏️ Теперь укажи **количество повторений** или рабочий диапазон (например: `8-12` или `10`):")
-    await state.set_state(WorkoutStates.waiting_for_reps)
-
-@dp.message(WorkoutStates.waiting_for_reps)
-async def process_workout_reps(message: types.Message, state: FSMContext):
-    reps_text = message.text.strip()
-    data = await state.get_data()
-    await state.clear()
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO user_workouts (user_id, workout_name, exercise_name, sets, reps)
-        VALUES (?, ?, ?, ?, ?)
-    """, (message.from_user.id, data['workout_name'], data['exercise_name'], data['sets'], reps_text))
-    conn.commit()
-    conn.close()
-    
-    text = (
-        f"✅ **Упражнение добавлено в твой тренировочный план!**\n\n"
-        f"📋 Программа: *{data['workout_name']}*\n"
-        f"💪 Упражнение: *{data['exercise_name']}*\n"
-        f"🔢 Нагрузка: *{data['sets']} подходов х {reps_text} повторений*\n"
-    )
-    
-    b = InlineKeyboardBuilder()
-    b.button(text="➕ Добавить еще одно упражнение", callback_data=f"w_select_{data['workout_name']}")
-    b.button(text="📖 Посмотреть получившийся план", callback_data="workout_view_my")
-    b.button(text="⬅️ В главное меню конструктора", callback_data="inline_workout")
-    b.adjust(1)
-    
-    await message.answer(text, reply_markup=b.as_markup(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "workout_view_my")
-async def workout_view_my_handler(c: types.CallbackQuery):
-    await c.answer()
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT workout_name, exercise_name, sets, reps FROM user_workouts WHERE user_id = ? ORDER BY id ASC", (c.from_user.id,))
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        b = InlineKeyboardBuilder()
-        b.button(text="➕ Создать тренировку", callback_data="workout_add_start")
-        b.button(text="⬅️ Назад", callback_data="inline_workout")
-        return await c.message.edit_text("😢 У тебя пока нет сохраненных упражнений в планах.", reply_markup=b.as_markup())
-        
-    programs = {}
-    for r in rows:
-        w_name, ex_name, sets, reps = r[0], r[1], r[2], r[3]
-        if w_name not in programs:
-            programs[w_name] = []
-        programs[w_name].append(f"  ▫️ {ex_name} — *{sets}х{reps}*")
-        
-    text = "📋 **Твои персональные тренировочные планы:**\n\n"
-    for w_name, exercises in programs.items():
-        text += f"🏋️‍♂️ **Программа: {w_name}**\n" + "\n".join(exercises) + "\n\n"
-        
-    b = InlineKeyboardBuilder()
-    b.button(text="➕ Добавить еще упражнение", callback_data="workout_add_start")
-    b.button(text="⬅️ Назад в конструктор", callback_data="inline_workout")
-    b.adjust(1)
-    
+    b.button(text="🔄 К выбору категорий", callback_data="inline_workout")
+    b.button(text="⬅️ В профиль", callback_data="back_to_profile")
+    b.adjust(1, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
 # --- ПРОСМОТР МЕНЮ ЕДЫ ---
@@ -853,7 +672,7 @@ async def meal_auto_generate_handler(c: types.CallbackQuery):
         "Расписание сбалансировано для стабильного удержания азотистого баланса и высокого анаболизма:\n\n"
         "🍳 *Завтрак* — ⏰ 08:30 (Напоминание в 08:00)\n"
         "🍗 *Обед* — ⏰ 13:00 (Напоминание в 12:30)\n"
-        "🍌 *Полдник* — ⏰ 16:30 (Напоминание в 16:00)\n"
+        "🍌 *Полдник* — ⏰ 16:30 (Напоминание in 16:00)\n"
         "🐟 *Ужин* — ⏰ 20:00 (Напоминание в 19:30)\n\n"
         "Вы можете в любой момент изменить или сбросить этот план."
     )
@@ -889,7 +708,7 @@ async def calc_diet_menu_handler(c: types.CallbackQuery):
     text = (
         "🍎 **Расчет индивидуального рациона**\n\n"
         "Выберите желаемый вариант продуктовой корзины для генерации меню:\n\n"
-        "🔸 **Бюджетный** — простая, доступная и полезная еда с повторяющейся структурой (овсянка, яйца, куриное филе, гречка, подсолнечное масло/семечки).\n"
+        "🔸 **Бюджетный** — простая, доступная и полезная еда с повторяющейся структурой (овсянка, яйца, куриное филе, гречка, подсолнечные семечки).\n"
         "🔸 **Стандартный** — оптимальный баланс цены и комфорта, добавляется больше разнообразия гарниров и источников белка (индейка, рис, творог, бананы).\n"
         "🔸 **Дорогой** — максимальное гастрономическое разнообразие блюд (красная рыба, говядина, орехи, морепродукты, авокадо)."
     )
@@ -901,60 +720,190 @@ async def calc_diet_menu_handler(c: types.CallbackQuery):
     b.adjust(1, 1, 1, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
+# ИСПРАВЛЕНО И ИНТЕГРИРОВАНО: Хэндлер динамического перерасчета граммовок
 @dp.callback_query(F.data.startswith("diet_tier_"))
 async def process_diet_tier(c: types.CallbackQuery):
     await c.answer()
     tier = c.data.replace("diet_tier_", "")
     
+    # Получаем данные пользователя из БД
     r, _ = await get_profile_data(c.from_user.id)
     if not r:
-        return await c.message.edit_text("Ошибка: профиль не найден. Пройдите регистрацию.")
+        return await c.message.edit_text("❌ Ошибка: профиль не найден. Пожалуйста, пройдите регистрацию.")
     
-    target_cals, target_prot, target_fats, target_carbs = r[4], r[5], r[6], r[7]
+    # Извлекаем индивидуальные целевые параметры КБЖУ пользователя из БД
+    target_cals = int(r[4])
+    target_prot = int(r[5])
+    target_fats = int(r[6])
+    target_carbs = int(r[7])
     
-    p_meal = round(target_prot / 4, 1)
-    f_meal = round(target_fats / 4, 1)
-    c_meal = round(target_carbs / 4, 1)
+    # Равномерно распределяем макронутриенты на 4 основных приема пищи
+    p_meal = target_prot / 4
+    f_meal = target_fats / 4
+    c_meal = target_carbs / 4
     cal_meal = round(target_cals / 4)
 
+    menu_text = ""
+    tier_title = ""
+
+    # ==========================================
+    # 💰 ВАРИАНТ 1: БЮДЖЕТНЫЙ РАЦИОН
+    # ==========================================
     if tier == "budget":
-        tier_title = "💰 Бюджетный рацион (Полезно и доступно)"
+        tier_title = "Бюджетный индивидуальный рацион"
+        
+        # 1. Завтрак: Овсянка + Цельные яйца
+        # Овсянка (на 100г): Б=12, Ж=6, У=62 | Яйцо (1 шт ~ 55г): Б=6.5, Ж=5.5, У=0.5
+        oats_weight = round((c_meal / 62) * 100)
+        oats_prot = (oats_weight * 12) / 100
+        eggs_count = max(1, round((p_meal - oats_prot) / 6.5))
+        
+        # 2. Обед: Куриное филе + Гречка
+        # Гречка (на 100г): Б=12.5, Ж=3.3, У=62 | Филе (на 100г): Б=23, Ж=2, У=0
+        buckwheat_weight = round((c_meal / 62) * 100)
+        buckwheat_prot = (buckwheat_weight * 12.5) / 100
+        chicken_weight_lunch = round((max(10, p_meal - buckwheat_prot) / 23) * 100)
+        
+        # 3. Полдник: Жидкий яичный белок + Подсолнечные семечки
+        # Семечки (на 100г): Б=20.7, Ж=52.9, У=3.4 | Яичный белок (на 100г): Б=11, Ж=0, У=0
+        # Выдаем жиры сразу за 2 приема (полдник + ужин), чтобы порция семечек была адекватной
+        seeds_weight = round(((f_meal * 2) / 52.9) * 100)
+        seeds_prot = (seeds_weight * 20.7) / 100
+        egg_whites_weight = round((max(10, p_meal - seeds_prot) / 11) * 100)
+        
+        # 4. Ужин: Филе Минтая + Рис (переносим остаток углеводов с полдника сюда)
+        # Рис (на 100г): Б=7, Ж=1, У=78 | Минтай (на 100г): Б=16, Ж=1, У=0
+        rice_weight = round(((c_meal * 2) / 78) * 100)
+        rice_prot = (rice_weight * 7) / 100
+        fish_weight = round((max(10, p_meal - rice_prot) / 16) * 100)
+
         menu_text = (
-            f"🍳 *Завтрак:*\n• Овсяные хлопья (на воде/молоке) + 2 цельных яйца\n\n"
-            f"🍗 *Обед:*\n• Отварное куриное филе + гречневая крупа\n\n"
-            f"🌻 *Полдник:*\n• Омлет из белков + горсть жареных очищенных подсолнечных семечек\n\n"
-            f"🐟 *Ужин:*\n• Минтай или белая рыба на пару + свежая капуста/огурец\n"
-        )
-    elif tier == "standard":
-        tier_title = "⚖️ Стандартный рацион (Разнообразно и оптимально)"
-        menu_text = (
-            f"🥞 *Завтрак:*\n• Овсяноблин с сыром + легкий творог 5%\n\n"
-            f"🥩 *Обед:*\n• Стейк из грудки индейки + пропаренный рис + томаты\n\n"
-            f"🍌 *Полдник:*\n• Банан + протеиновый шейк или йогурт\n\n"
-            f"🍗 *Ужин:*\n• Запеченное куриное филе + макароны из твердых сортов + оливковое масло\n"
-        )
-    else:
-        tier_title = "💎 Дорогой рацион (Максимальное разнообразие)"
-        menu_text = (
-            f"🥑 *Завтрак:*\n• Тосты со слабосоленым лососем, авокадо и яйцом пашот\n\n"
-            f"🥩 *Обед:*\n• Постная говядина/телятина на гриле + киноа или бурый рис + брокколи\n\n"
-            f"🥜 *Полдник:*\n• Микс элитных орехов (кешью, миндаль) + греческий йогурт\n\n"
-            f"🍤 *Ужин:*\n• Тигровые креветки или кальмары + легкий салат с сыром фета\n"
+            f"🍳 *Завтрак (Утренний анаболизм):*\n"
+            f"• **{oats_weight} г** Овсяных хлопьев (в сухом виде)\n"
+            f"• **{eggs_count} шт.** Цельных куриных яиц (варить или жарить без масла)\n\n"
+            f"🍗 *Обед (Основной загруз):*\n"
+            f"• **{chicken_weight_lunch} г** Куриного филе (в сыром виде)\n"
+            f"• **{buckwheat_weight} г** Гречневой крупы (в сухом виде)\n\n"
+            f"🌻 *Полдник (Полезные жиры и чистый белок):*\n"
+            f"• **{egg_whites_weight} г** Жидкого яичного белка (или ~{round(egg_whites_weight/33)} белков крупных яиц)\n"
+            f"• **{seeds_weight} г** Жареных очищенных подсолнечных семечек\n\n"
+            f"🐟 *Ужин (Легкий белок на ночь):*\n"
+            f"• **{fish_weight} г** Филе минтая или трески (в сыром виде)\n"
+            f"• **{rice_weight} г** Рис (в сухом виде)\n"
         )
 
+    # ==========================================
+    # ⚖️ ВАРИАНТ 2: СТАНДАРТНЫЙ РАЦИОН
+    # ==========================================
+    elif tier == "standard":
+        tier_title = "Стандартный индивидуальный рацион"
+        
+        # 1. Завтрак: Творог 5% + Овсянка
+        # Творог 5% (на 100г): Б=16, Ж=5, У=3
+        oats_weight = round((c_meal / 62) * 100)
+        oats_prot = (oats_weight * 12) / 100
+        cottage_cheese = round((max(10, p_meal - oats_prot) / 16) * 100)
+        
+        # 2. Обед: Филе индейки + Рис + Оливковое масло
+        # Индейка (на 100г): Б=22, Ж=2, У=0 | Масло (на 100г): Ж=99.9
+        rice_weight = round((c_meal / 78) * 100)
+        rice_prot = (rice_weight * 7) / 100
+        turkey_weight = round((max(10, p_meal - rice_prot) / 22) * 100)
+        oil_lunch = round((f_meal / 99.9) * 100)
+        
+        # 3. Полдник: Банан + Сывороточный протеин
+        # Банан (1 шт средний ~ 22г углей) | Протеин (1 порция 30г ~ 24г белка)
+        banana_count = max(1, round(c_meal / 21.8))
+        protein_scoops = round(p_meal / 24, 1)
+        
+        # 4. Ужин: Куриное филе + Макароны тв. сортов + Оливковое масло
+        # Макароны (на 100г): Б=12, Ж=1.5, У=70
+        pasta_weight = round((c_meal / 70) * 100)
+        pasta_prot = (pasta_weight * 12) / 100
+        chicken_weight_dinner = round((max(10, p_meal - pasta_prot) / 23) * 100)
+        oil_dinner = round((f_meal / 99.9) * 100)
+
+        menu_text = (
+            f"🥞 *Завтрак:*\n"
+            f"• **{oats_weight} г** Овсяных хлопьев\n"
+            f"• **{cottage_cheese} г** Творога 5% жирности\n\n"
+            f"🥩 *Обед:*\n"
+            f"• **{turkey_weight} г** Филе индейки\n"
+            f"• **{rice_weight} г** Риса (в сухом виде)\n"
+            f"• **{oil_lunch} г** (или ~1 ч.л.) Оливкового масла\n\n"
+            f"🍌 *Полдник:*\n"
+            f"• **{banana_count} шт.** Свежих бананов\n"
+            f"• **{protein_scoops} порц.** Сывороточного протеина\n\n"
+            f"🍗 *Ужин:*\n"
+            f"• **{chicken_weight_dinner} г** Куриного филе\n"
+            f"• **{pasta_weight} г** Макарон твердых сортов\n"
+            f"• **{oil_dinner} г** Оливкового масла\n"
+        )
+
+    # ==========================================
+    # 💎 ВАРИАНТ 3: VIP / ДОРОГОЙ РАЦИОН
+    # ==========================================
+    else:
+        tier_title = "Дорогой индивидуальный рацион"
+        
+        # 1. Завтрак: Красная рыба + Авокадо + Тосты
+        # Семга (на 100г): Б=20, Ж=15, У=0 | Авокадо (на 100г): Б=2, Ж=15, У=6 | Хлеб (на 100г): У=50
+        salmon_weight = round((p_meal / 20) * 100)
+        salmon_fats = (salmon_weight * 15) / 100
+        avocado_weight = round((max(5, (f_meal * 2) - salmon_fats) / 15) * 100)
+        bread_weight = round((c_meal / 50) * 100)
+        
+        # 2. Обед: Постная говядина + Киноа
+        # Говядина (на 100г): Б=22, Ж=7, У=0 | Киноа (на 100г): Б=14, Ж=6, У=57
+        quinoa_weight = round((c_meal / 57) * 100)
+        quinoa_prot = (quinoa_weight * 14) / 100
+        beef_weight = round((max(10, p_meal - quinoa_prot) / 22) * 100)
+        
+        # 3. Полдник: Орехи Кешью + Греческий йогурт 0%
+        # Кешью (на 100г): Б=18, Ж=48, У=22 | Йогурт (на 100г): Б=10, Ж=0, У=4
+        cashew_weight = round((f_meal / 48) * 100)
+        cashew_prot = (cashew_weight * 18) / 100
+        yogurt_weight = round((max(10, p_meal - cashew_prot) / 10) * 100)
+        
+        # 4. Ужин: Тигровые креветки + Бурый рис
+        # Креветки (на 100г): Б=22, Ж=1, У=0 | Бурый рис (на 100г): Б=7, Ж=2, У=72
+        rice_brown_weight = round((c_meal / 72) * 100)
+        rice_brown_prot = (rice_brown_weight * 7) / 100
+        shrimps_weight = round((max(10, p_meal - rice_brown_prot) / 22) * 100)
+
+        menu_text = (
+            f"🥑 *Завтрак:*\n"
+            f"• **{salmon_weight} г** Слабосоленой семги или лосося\n"
+            f"• **{avocado_weight} г** Свежего авокадо\n"
+            f"• **{bread_weight} г** Цельнозернового тостового хлеба\n\n"
+            f"🥩 *Обед:*\n"
+            f"• **{beef_weight} г** Постной говяжьей вырезки\n"
+            f"• **{quinoa_weight} г** Крупы киноа\n\n"
+            f"🥜 *Полдник:*\n"
+            f"• **{cashew_weight} г** Орехов кешью\n"
+            f"• **{yogurt_weight} г** Натурального греческого йогурта 0%\n\n"
+            f"🍤 *Ужин:*\n"
+            f"• **{shrimps_weight} г** Очищенных тигровых креветок или кальмаров\n"
+            f"• **{rice_brown_weight} г** Бурого нешлифованного риса\n"
+        )
+
+    # Собираем итоговое сообщение плана питания с обновленной строкой заголовка
     text = (
-        f"📋 *{tier_title}*\n"
-        f"🍱 _Сгенерирован под твои параметры нормы КБЖУ_\n\n"
-        f"🎯 *Цель на каждый из 4-х приемов пищи:*\n"
-        f" Каждый прием должен содержать примерно: *{cal_meal} ккал* | "
-        f"*Б: {p_meal}г* | *Ж: {f_meal}г* | *У: {c_meal}г*\n\n"
+        f"📖 *Меню еды в базе: {tier_title}*\n"
+        f"🎯 _План составлен строго под твои суточные лимиты:_\n"
+        f"**{target_cals} ккал** | **Б: {target_prot}г** | **Ж: {target_fats}г** | **У: {target_carbs}г**\n\n"
+        f"📊 *Средний ориентир на каждый из 4-х приемов:* \n"
+        f"~`{cal_meal} ккал` | `Б: {round(p_meal, 1)}г` | `Ж: {round(f_meal, 1)}г` | `У: {round(c_meal, 1)}г` \n\n"
         f"{menu_text}\n"
-        f"💡 _Взвешивай продукты в сухом/сыром виде перед готовкой для соблюдения лимитов БЖУ!_"
+        f"⚠️ **Важно:** Вес всех крупы, макарон, мяса и рыбы указан исключительно в **сухом / сыром виде** (до готовки)!"
     )
     
+    # Сборка инлайн-клавиатуры
     b = InlineKeyboardBuilder()
-    b.button(text="🔄 Изменить вариант корзины", callback_data="calc_diet_menu")
-    b.button(text="⬅️ В профиль", callback_data="back_to_profile")
+    b.button(text="🔄 Изменить продуктовую корзину", callback_data="calc_diet_menu")
+    b.button(text="⬅️ Вернуться в профиль", callback_data="back_to_profile")
+    b.adjust(1, 1)
+    
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
 # --- ХЭНДЛЕР НАЗАД В ПРОФИЛЬ ---
