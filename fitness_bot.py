@@ -9,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 # Подключаем расширенные базы данных из соседнего файла database.py
 from database import FOOD_DATABASE, EXERCISE_DATABASE
 
+# Используем уже вписанный токен или берем его из окружения (строка адаптирована)
 TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
 
 bot = Bot(token=TOKEN)
@@ -209,7 +210,6 @@ async def process_activity_click(c: types.CallbackQuery, state: FSMContext):
 async def skip_advanced_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
     data = await state.get_data()
-    # Заполняем дефолтами то, что юзер не успел ввести
     defaults = {
         "strength_workouts": 0, "cardio_workouts": 0, "cardio_details": "Нет",
         "experience": "Не указан", "body_fat": 0.0, "activity_level": "Средняя"
@@ -225,13 +225,11 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
     
-    # Формула Миффлина-Сан Жеора
     if data['gender'] == "Мужчина":
         bmr = 10 * data['weight'] + 6.25 * data['height'] - 5 * data['age'] + 5
     else:
         bmr = 10 * data['weight'] + 6.25 * data['height'] - 5 * data['age'] - 161
         
-    # Коэффициент активности на базе тренировок и быта
     total_workouts = data['strength_workouts'] + data['cardio_workouts']
     if total_workouts >= 5: act_coeff = 1.55
     elif total_workouts >= 3: act_coeff = 1.375
@@ -242,7 +240,6 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext):
     
     maintenance = round(bmr * act_coeff)
     
-    # Распределение КБЖУ в зависимости от целей
     if data['goal'] == "Сушка, дефицит":
         cals = round(maintenance * 0.8)
         prot = round(data['weight'] * 2.2)
@@ -259,7 +256,6 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext):
     carbs = round((cals - (prot * 4 + fats * 9)) / 4)
     if carbs < 0: carbs = 0
 
-    # Сохраняем в базу данных
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -279,7 +275,7 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext):
         f"Нажми на кнопку **📋 Мой профиль** ниже, чтобы открыть главное меню управления."
     )
 
-# ==================== ГЛАВНЫЙ ИНТЕРФЕЙС ПРОФИЛЯ (СТРОГО ПО СХЕМЕ КЛИЕНТА) ====================
+# ==================== ГЛАВНЫЙ ИНТЕРФЕЙС ПРОФИЛЯ ====================
 @dp.message(F.text == "📋 Мой профиль")
 async def view_profile(message: types.Message):
     conn = sqlite3.connect(DB_NAME)
@@ -298,7 +294,6 @@ async def view_profile(message: types.Message):
         await message.answer("Профиль пуст. Нажмите /start для заполнения анкеты КБЖУ.")
         return
 
-    # Текст профиля в формате: Потребление калорий (съедено / суточная норма) и БЖУ по аналогии
     text = (
         f"📋 **Профиль**\n\n"
         f"Пол: {r[0]}\n"
@@ -312,7 +307,6 @@ async def view_profile(message: types.Message):
         f"▪️ Углеводы: `{round(l[3], 1)}` / `{r[7]}` г"
     )
 
-    # Строим клавиатуру в точности как на рисунке Безымянный_3.png
     b = InlineKeyboardBuilder()
     
     # Ряд 1: Сбросить профиль | Подсчет КБЖУ
@@ -323,10 +317,10 @@ async def view_profile(message: types.Message):
     b.button(text="🏋️ Конструктор тренировочного плана", callback_data="inline_workout")
     b.button(text="📖 Меню еды в базе данных", callback_data="view_food_db")
     
-    # Ряд 3: Календарь приема пищи (на всю ширину снизу)
+    # Ряд 3: Календарь приема пищи
     b.button(text="📅 Календарь приема пищи", callback_data="food_calendar")
     
-    b.adjust(2, 2, 1) # Разметка рядов: 2 кнопки, затем 2 кнопки, затем 1 кнопка
+    b.adjust(2, 2, 1)
     
     await message.answer(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
@@ -393,7 +387,7 @@ async def process_batch_food(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Добавлено: +{round(added_cals)} ккал (Б:{round(added_prot,1)} | Ж:{round(added_fats,1)} | У:{round(added_carbs,1)})")
     await view_profile(message)
 
-# --- ПРОСМОТР УПРАЖНЕНИЙ (ИЗ DATABASE.PY) ---
+# --- ПРОСМОТР УПРАЖНЕНИЙ ---
 @dp.callback_query(F.data == "inline_workout")
 async def inline_workout_handler(c: types.CallbackQuery):
     await c.answer()
@@ -423,7 +417,7 @@ async def show_exercises_by_category(c: types.CallbackQuery):
     b.adjust(1, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
-# --- ПРОСМОТР БОЛЬШОГО МЕНЮ ЕДЫ ---
+# --- ПРОСМОТР МЕНЮ ЕДЫ ---
 @dp.callback_query(F.data == "view_food_db")
 async def view_food_db_handler(c: types.CallbackQuery):
     await c.answer()
