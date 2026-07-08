@@ -3,6 +3,7 @@ import re
 import math
 import sqlite3
 import asyncio
+import random
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -256,15 +257,15 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext, use
     
     if data['goal'] == "Сушка, дефицит":
         cals = round(maintenance * 0.8)
-        prot = round(data['weight'] * 2.2)
-        fats = round(data['weight'] * 0.9)
+        prot = round(data['weight'] * 2.2) if data['gender'] == "Мужчина" else round(data['weight'] * 1.8)
+        fats = round(data['weight'] * 0.9) if data['gender'] == "Мужчина" else round(data['weight'] * 1.0)
     elif data['goal'] == "Массонабор, профицит":
         cals = round(maintenance * 1.15)
-        prot = round(data['weight'] * 2.0)
+        prot = round(data['weight'] * 2.0) if data['gender'] == "Мужчина" else round(data['weight'] * 1.7)
         fats = round(data['weight'] * 1.0)
     else:
         cals = maintenance
-        prot = round(data['weight'] * 1.8)
+        prot = round(data['weight'] * 1.8) if data['gender'] == "Мужчина" else round(data['weight'] * 1.5)
         fats = round(data['weight'] * 1.0)
         
     carbs = round((cals - (prot * 4 + fats * 9)) / 4)
@@ -357,7 +358,6 @@ async def inline_eat_handler(c: types.CallbackQuery, state: FSMContext):
     await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе готовое`):")
     await state.set_state(FoodStates.waiting_for_batch)
 
-# ИНТЕГРИРОВАНО ИЗ ПЕРВОГО ФАЙЛА: Улучшенный обработчик ввода продуктов
 @dp.message(FoodStates.waiting_for_batch)
 async def process_batch_food(message: types.Message, state: FSMContext):
     await state.clear()
@@ -374,17 +374,14 @@ async def process_batch_food(message: types.Message, state: FSMContext):
         weight = 100
         product_name = item
         
-        # Регулярное выражение ищет цифры (включая точки/запятые) перед буквой 'г'
         weight_match = re.search(r'(\d+[.,]?\d*)\s*г', item)
         if weight_match:
             try:
                 weight = float(weight_match.group(1).replace(",", "."))
             except ValueError:
                 weight = 100
-            # Отрезаем часть с граммами, оставляя только название продукта
             product_name = item.replace(weight_match.group(0), "").strip()
         else:
-            # Если "г" не написано, но есть цифры в начале строки (например "150 овсянки")
             digit_match = re.match(r'^(\d+[.,]?\d*)', item)
             if digit_match:
                 try:
@@ -393,17 +390,13 @@ async def process_batch_food(message: types.Message, state: FSMContext):
                     weight = 100
                 product_name = item.replace(digit_match.group(0), "").strip()
             else:
-                # Если цифр вообще нет, убираем лишние символы
                 product_name = "".join(filter(lambda ch: not ch.isdigit(), item)).strip()
 
-        # Очищаем имя от лишних предлогов/мусора на конце для более точного сопоставления
         product_name = re.sub(r'^(из|при|приготовленного|сырого)\s+', '', product_name)
 
-        # Умный поиск по алиасам (падежам и склонениям)
         found = False
         for internal_name, data in FOOD_DATABASE.items():
             for alias in data['aliases']:
-                # Проверяем, содержится ли корень/алиас в строке пользователя, или наоборот
                 if alias in product_name or product_name in alias:
                     coef = weight / 100.0
                     added_cals += data['cals'] * coef
@@ -411,7 +404,6 @@ async def process_batch_food(message: types.Message, state: FSMContext):
                     added_fats += data['fats'] * coef
                     added_carbs += data['carbs'] * coef
                     
-                    # Красивое имя для отчета пользователю
                     display_name = internal_name.replace("_", " ").capitalize()
                     recognized_products.append(f"• {display_name} ({round(weight)}г)")
                     found = True
@@ -441,7 +433,6 @@ async def process_batch_food(message: types.Message, state: FSMContext):
     
     await message.answer(report, parse_mode="Markdown")
     
-    # Возвращаем интерфейс профиля
     r, l = await get_profile_data(message.from_user.id)
     if r:
         text, markup = generate_profile_interface(r, l)
@@ -661,7 +652,6 @@ async def meal_time_chosen(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    # Расчет пред-уведомления за 30 минут
     hours, minutes = map(int, time_text.split(":"))
     total_minutes = hours * 60 + minutes - 30
     if total_minutes < 0:
@@ -749,17 +739,20 @@ async def calc_diet_menu_handler(c: types.CallbackQuery):
     await c.answer()
     text = (
         "🍎 **Расчет индивидуального рациона**\n\n"
-        "Выберите желаемый вариант продуктовой корзины для генерации меню:\n\n"
-        "🔸 **Бюджетный** — простая, доступная и полезная еда с повторяющейся структурой (овсянка, яйца, куриное филе, гречка, подсолнечные семечки).\n"
-        "🔸 **Стандартный** — оптимальный баланс цены и комфорта, добавляется больше разнообразия гарниров и источников белка (индейка, рис, творог, бананы).\n"
-        "🔸 **Дорогой** — максимальное гастрономическое разнообразие блюд (красная рыба, говядина, орехи, морепродукты, авокадо)."
+        "Выберите желаемый вариант продуктовой корзины для генерации меню. "
+        "Внутри каждого варианта заложено несколько планов, выбирающихся случайно:\n\n"
+        "🔸 **Бюджетный 💰** — простая и доступная еда (овсянка, яйца, филе курицы, гречка, минтай, подсолнечные семечки).\n"
+        "🔸 **Стандартный ⚖️** — баланс цены и комфорта (индейка, рис, творог, бананы, макароны, оливковое масло).\n"
+        "🔸 **Дорогой 💎** — премиум разнообразие (красная рыба, киноа, авокадо, говядина, креветки, кешью).\n"
+        "🔸 **Сушка (Профи) 🔥** — бескомпромиссное жиросжигание. Продукты с низким ГИ, безлактозное молоко/йогурт, чистейшие изоляты белков, белая рыба и семена."
     )
     b = InlineKeyboardBuilder()
     b.button(text="Бюджетный 💰", callback_data="diet_tier_budget")
     b.button(text="Стандартный ⚖️", callback_data="diet_tier_standard")
     b.button(text="Дорогой 💎", callback_data="diet_tier_luxury")
+    b.button(text="Сушка (Профи) 🔥", callback_data="diet_tier_shred")
     b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
-    b.adjust(1, 1, 1, 1)
+    b.adjust(2, 2, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("diet_tier_"))
@@ -767,18 +760,16 @@ async def process_diet_tier(c: types.CallbackQuery):
     await c.answer()
     tier = c.data.replace("diet_tier_", "")
     
-    # Получаем данные пользователя из БД
     r, _ = await get_profile_data(c.from_user.id)
     if not r:
         return await c.message.edit_text("❌ Ошибка: профиль не найден. Пожалуйста, пройдите регистрацию.")
     
-    # Извлекаем индивидуальные целевые параметры КБЖУ пользователя из БД
+    gender = r[0] # "Мужчина" или "Женщина"
     target_cals = int(r[4])
     target_prot = int(r[5])
     target_fats = int(r[6])
     target_carbs = int(r[7])
     
-    # Равномерно распределяем макронутриенты на 4 основных приема пищи
     p_meal = target_prot / 4
     f_meal = target_fats / 4
     c_meal = target_carbs / 4
@@ -786,139 +777,192 @@ async def process_diet_tier(c: types.CallbackQuery):
 
     menu_text = ""
     tier_title = ""
+    
+    # Генерируем случайный номер плана от 1 до 3
+    plan_variant = random.randint(1, 3)
 
     # ==========================================
-    # 💰 ВАРИАНТ 1: БЮДЖЕТНЫЙ РАЦИОН
+    # 💰 КОРЗИНА 1: БЮДЖЕТНЫЙ РАЦИОН (3 Плана)
     # ==========================================
     if tier == "budget":
-        tier_title = "Бюджетный индивидуальный рацион"
+        tier_title = f"Бюджетный рацион (Вариант №{plan_variant})"
         
-        # 1. Завтрак: Овсянка + Цельные яйца
-        oats_weight = round((c_meal / 62) * 100)
-        oats_prot = (oats_weight * 12) / 100
-        eggs_count = max(1, round((p_meal - oats_prot) / 6.5))
-        
-        # 2. Обед: Куриное филе + Гречка
-        buckwheat_weight = round((c_meal / 62) * 100)
-        buckwheat_prot = (buckwheat_weight * 12.5) / 100
-        chicken_weight_lunch = round((max(10, p_meal - buckwheat_prot) / 23) * 100)
-        
-        # 3. Полдник: Жидкий яичный белок + Подсолнечные семечки
-        seeds_weight = round(((f_meal * 2) / 52.9) * 100)
-        seeds_prot = (seeds_weight * 20.7) / 100
-        egg_whites_weight = round((max(10, p_meal - seeds_prot) / 11) * 100)
-        
-        # 4. Ужин: Филе Минтая + Рис
-        rice_weight = round(((c_meal * 2) / 78) * 100)
-        rice_prot = (rice_weight * 7) / 100
-        fish_weight = round((max(10, p_meal - rice_prot) / 16) * 100)
+        if plan_variant == 1:
+            oats_weight = round((c_meal / 62) * 100)
+            eggs_count = max(1, round((p_meal - ((oats_weight * 12) / 100)) / 6.5))
+            buckwheat_weight = round((c_meal / 62) * 100)
+            chicken_weight = round((max(10, p_meal - ((buckwheat_weight * 12.5) / 100)) / 23) * 100)
+            seeds_weight = round(((f_meal * 2) / 53) * 100)
+            egg_whites_weight = round((max(10, p_meal - ((seeds_weight * 20) / 100)) / 11) * 100)
+            rice_weight = round(((c_meal * 2) / 78) * 100)
+            fish_weight = round((max(10, p_meal - ((rice_weight * 7) / 100)) / 16) * 100)
 
-        menu_text = (
-            f"🍳 *Завтрак (Утренний анаболизм):*\n"
-            f"• **{oats_weight} г** Овсяных хлопьев (в сухом виде)\n"
-            f"• **{eggs_count} шт.** Цельных куриных яиц (варить или жарить без масла)\n\n"
-            f"🍗 *Обед (Основной загруз):*\n"
-            f"• **{chicken_weight_lunch} г** Куриного филе (в сыром виде)\n"
-            f"• **{buckwheat_weight} г** Гречневой крупы (в сухом виде)\n\n"
-            f"🌻 *Полдник (Полезные жиры и чистый белок):*\n"
-            f"• **{egg_whites_weight} г** Жидкого яичного белка (или ~{round(egg_whites_weight/33)} белков крупных яиц)\n"
-            f"• **{seeds_weight} г** Жареных очищенных подсолнечных семечек\n\n"
-            f"🐟 *Ужин (Легкий белок на ночь):*\n"
-            f"• **{fish_weight} г** Филе минтая или трески (в сыром виде)\n"
-            f"• **{rice_weight} г** Рис (в сухом виде)\n"
-        )
+            menu_text = (
+                f"🍳 *Завтрак:*\n• **{oats_weight} г** Овсяных хлопьев\n• **{eggs_count} шт.** Цельных яиц\n\n"
+                f"🍗 *Обед:*\n• **{chicken_weight} г** Куриного филе\n• **{buckwheat_weight} г** Гречневой крупы\n\n"
+                f"🌻 *Полдник:*\n• **{egg_whites_weight} г** Жидкого яичного белка\n• **{seeds_weight} г** Подсолнечных семечек\n\n"
+                f"🐟 *Ужин:*\n• **{fish_weight} г** Филе минтая\n• **{rice_weight} г** Риса\n"
+            )
+        elif plan_variant == 2:
+            # План 2: Смещение углеводов (ячмень/макароны), белок из яиц и курицы
+            pasta_weight = round((c_meal / 72) * 100)
+            chicken_weight_1 = round((p_meal / 23) * 100)
+            rice_weight = round((c_meal / 78) * 100)
+            chicken_weight_2 = round((p_meal / 23) * 100)
+            eggs_count = max(1, round(f_meal / 5))
+            
+            menu_text = (
+                f"🍳 *Завтрак:*\n• **{eggs_count} шт.** Цельных вареных яиц\n• **80 г** Хлебцев ржаных\n\n"
+                f"🍗 *Обед:*\n• **{chicken_weight_1} г** Куриного филе\n• **{pasta_weight} г** Макарон\n\n"
+                f"🌾 *Полдник:*\n• **{chicken_weight_2} г** Куриного филе\n• **{rice_weight} г** Риса\n\n"
+                f"🥛 *Ужин:*\n• **250 г** Кефира 1% (низкобюджетный источник белка)\n"
+            )
+        else:
+            # План 3: Максимально простой (Гречка + Яйца + Минтай)
+            buckwheat_weight = round(((c_meal * 2) / 62) * 100)
+            fish_weight = round(((p_meal * 2) / 16) * 100)
+            eggs_count = max(2, round((f_meal * 2) / 5))
+            
+            menu_text = (
+                f"🍳 *Завтрак:*\n• **{eggs_count} шт.** Яичница без масла\n• **50 г** Овсянки\n\n"
+                f"🐟 *Обед:*\n• **{fish_weight // 2} г** Филе минтая\n• **{buckwheat_weight // 2} г** Гречки\n\n"
+                f"🌻 *Полдник:*\n• **30 г** Подсолнечных семечек\n\n"
+                f"🐟 *Ужин:*\n• **{fish_weight // 2} г** Филе минтая\n• **{buckwheat_weight // 2} г** Гречки\n"
+            )
 
     # ==========================================
-    # ⚖️ ВАРИАНТ 2: СТАНДАРТНЫЙ РАЦИОН
+    # ⚖️ КОРЗИНА 2: СТАНДАРТНЫЙ РАЦИОН (3 Плана)
     # ==========================================
     elif tier == "standard":
-        tier_title = "Стандартный индивидуальный рацион"
+        tier_title = f"Стандартный рацион (Вариант №{plan_variant})"
         
-        # 1. Завтрак: Творог 5% + Овсянка
-        oats_weight = round((c_meal / 62) * 100)
-        oats_prot = (oats_weight * 12) / 100
-        cottage_cheese = round((max(10, p_meal - oats_prot) / 16) * 100)
-        
-        # 2. Обед: Филе индейки + Рис + Оливковое масло
-        rice_weight = round((c_meal / 78) * 100)
-        rice_prot = (rice_weight * 7) / 100
-        turkey_weight = round((max(10, p_meal - rice_prot) / 22) * 100)
-        oil_lunch = round((f_meal / 99.9) * 100)
-        
-        # 3. Полдник: Банан + Сывороточный протеин
-        banana_count = max(1, round(c_meal / 21.8))
-        protein_scoops = round(p_meal / 24, 1)
-        
-        # 4. Ужин: Куриное филе + Макароны тв. сортов + Оливковое масло
-        pasta_weight = round((c_meal / 70) * 100)
-        pasta_prot = (pasta_weight * 12) / 100
-        chicken_weight_dinner = round((max(10, p_meal - pasta_prot) / 23) * 100)
-        oil_dinner = round((f_meal / 99.9) * 100)
+        if plan_variant == 1:
+            oats_weight = round((c_meal / 62) * 100)
+            cottage_cheese = round((max(10, p_meal - ((oats_weight * 12) / 100)) / 16) * 100)
+            rice_weight = round((c_meal / 78) * 100)
+            turkey_weight = round((max(10, p_meal - ((rice_weight * 7) / 100)) / 22) * 100)
+            banana_count = max(1, round(c_meal / 22))
+            pasta_weight = round((c_meal / 70) * 100)
+            chicken_weight = round((max(10, p_meal - ((pasta_weight * 12) / 100)) / 23) * 100)
 
-        menu_text = (
-            f"🥞 *Завтрак:*\n"
-            f"• **{oats_weight} г** Овсяных хлопьев\n"
-            f"• **{cottage_cheese} г** Творога 5% жирности\n\n"
-            f"🥩 *Обед:*\n"
-            f"• **{turkey_weight} г** Филе индейки\n"
-            f"• **{rice_weight} г** Риса (в сухом виде)\n"
-            f"• **{oil_lunch} г** (или ~1 ч.л.) Оливкового масла\n\n"
-            f"🍌 *Полдник:*\n"
-            f"• **{banana_count} шт.** Свежих бананов\n"
-            f"• **{protein_scoops} порц.** Сывороточного протеина\n\n"
-            f"🍗 *Ужин:*\n"
-            f"• **{chicken_weight_dinner} г** Куриного филе\n"
-            f"• **{pasta_weight} г** Макарон твердых сортов\n"
-            f"• **{oil_dinner} г** Оливкового масла\n"
-        )
+            menu_text = (
+                f"🥞 *Завтрак:*\n• **{oats_weight} г** Овсяных хлопьев\n• **{cottage_cheese} г** Творога 5%\n\n"
+                f"🥩 *Обед:*\n• **{turkey_weight} г** Филе индейки\n• **{rice_weight} г** Риса\n• **1 ч.л.** Оливкового масла\n\n"
+                f"🍌 *Полдник:*\n• **{banana_count} шт.** Бананов\n• **1.5 порц.** Сывороточного протеина\n\n"
+                f"🍗 *Ужин:*\n• **{chicken_weight} г** Куриного филе\n• **{pasta_weight} г** Макарон\n"
+            )
+        elif plan_variant == 2:
+            # План 2: Рис, горбуша, хлебцы
+            rice_weight = round(((c_meal * 2) / 78) * 100)
+            fish_weight = round(((p_meal * 2) / 20) * 100)
+            
+            menu_text = (
+                f"🍳 *Завтрак:*\n• **3 шт.** Яйца всмятку\n• **60 г** Тостов из ржаного хлеба\n\n"
+                f"🐟 *Обед:*\n• **{fish_weight // 2} г** Запеченной горбуши\n• **{rice_weight // 2} г** Риса Басмати\n\n"
+                f"🥛 *Полдник:*\n• **200 г** Ряженки или йогурта\n• **1 порция** Протеина\n\n"
+                f"🐟 *Ужин:*\n• **{fish_weight // 2} г** Горбуши\n• **{rice_weight // 2} г** Риса\n"
+            )
+        else:
+            # План 3: Творожно-овсяный блин + индейка с гречкой
+            menu_text = (
+                f"🥞 *Завтрак (Овсяноблин):*\n• **60 г** Овсянки + **2 шт.** Яйца\n• **100 г** Творога 5%\n\n"
+                f"🥩 *Обед:*\n• **150 г** Филе индейки\n• **80 г** Гречки\n\n"
+                f"🍎 *Полдник:*\n• **2 шт.** Зеленых яблок\n• **30 г** Орехов (миндаль)\n\n"
+                f"🍗 *Ужин:*\n• **150 г** Куриного филе на гриле\n• **200 г** Овощного салата с оливковым маслом\n"
+            )
 
     # ==========================================
-    # 💎 ВАРИАНТ 3: VIP / ДОРОГОЙ РАЦИОН
+    # 💎 КОРЗИНА 3: VIP / ДОРОГОЙ РАЦИОН (3 Плана)
+    # ==========================================
+    elif tier == "luxury":
+        tier_title = f"VIP-Рацион (Вариант №{plan_variant})"
+        
+        if plan_variant == 1:
+            salmon_weight = round((p_meal / 20) * 100)
+            avocado_weight = round((max(5, (f_meal * 2) - ((salmon_weight * 15) / 100)) / 15) * 100)
+            bread_weight = round((c_meal / 50) * 100)
+            quinoa_weight = round((c_meal / 57) * 100)
+            beef_weight = round((max(10, p_meal - ((quinoa_weight * 14) / 100)) / 22) * 100)
+            cashew_weight = round((f_meal / 48) * 100)
+            yogurt_weight = round((max(10, p_meal - ((cashew_weight * 18) / 100)) / 10) * 100)
+            rice_brown_weight = round((c_meal / 72) * 100)
+            shrimps_weight = round((max(10, p_meal - ((rice_brown_weight * 7) / 100)) / 22) * 100)
+
+            menu_text = (
+                f"🥑 *Завтрак:*\n• **{salmon_weight} г** Семги слабосоленой\n• **{avocado_weight} г** Авокадо\n• **{bread_weight} г** Цельнозернового хлеба\n\n"
+                f"🥩 *Обед:*\n• **{beef_weight} г** Постной говядины\n• **{quinoa_weight} г** Киноа\n\n"
+                f"🥜 *Полдник:*\n• **{cashew_weight} г** Кешью\n• **{yogurt_weight} г** Греческого йогурта 0%\n\n"
+                f"🍤 *Ужин:*\n• **{shrimps_weight} г** Тигровых креветок\n• **{rice_brown_weight} г** Бурого риса\n"
+            )
+        elif plan_variant == 2:
+            # План 2: Стейк из тунца, спаржа, кускус
+            menu_text = (
+                f"🍳 *Завтрак:*\n• **3 шт.** Яичница-глазунья\n• **50 г** Слабосоленого лосося\n• **1 шт.** Рукола и черри салат\n\n"
+                f"🐟 *Обед (Рыбный VIP):*\n• **200 г** Стейка из тунца\n• **80 г** Крупы Кускус\n• **100 г** Спаржи на пару\n\n"
+                f"🍓 *Полдник:*\n• **150 г** Свежих ягод (голубика/малина)\n• **40 г** Орехов макадамия\n\n"
+                f"🥩 *Ужин:*\n• **180 г** Телячьей вырезки\n• **250 г** Запеченных овощей (брокколи, перец)\n"
+            )
+        else:
+            # План 3: Морепродукты, киноа, гребешки
+            menu_text = (
+                f"🥑 *Завтрак:*\n• **1 шт.** Яйцо пашот\n• **1/2 шт.** Авокадо\n• **60 г** Чиа-пудинга на миндальном молоке\n\n"
+                f"🍤 *Обед:*\n• **180 г** Морских гребешков или кальмаров\n• **70 г** Черного дикого риса\n\n"
+                f"🍍 *Полдник:*\n• **100 г** Свежего ананаса\n• **1 порция** Изолята сывороточного протеина\n\n"
+                f"🥩 *Ужин:*\n• **160 г** Стейка Рибай (постного) или утиной грудки\n• **80 г** Киноа\n"
+            )
+
+    # ==========================================
+    # 🔥 КОРЗИНА 4: СУШКА / ЖЕСТКИЙ ДЕФИЦИТ (3 Плана)
     # ==========================================
     else:
-        tier_title = "Дорогой индивидуальный рацион"
+        tier_title = f"Сушка (Профи) 🩸 (Вариант №{plan_variant})"
         
-        # 1. Завтрак: Красная рыба + Авокадо + Тосты
-        salmon_weight = round((p_meal / 20) * 100)
-        salmon_fats = (salmon_weight * 15) / 100
-        avocado_weight = round((max(5, (f_meal * 2) - salmon_fats) / 15) * 100)
-        bread_weight = round((c_meal / 50) * 100)
+        # Адаптация под женщин и мужчин: женщинам убираем тяжелый лактомин и заменяем на легкие аминокислоты/изоляты
+        protein_source = "Изолят соевого/сывороточного белка (без лактозы)" if gender == "Женщина" else "Говяжий протеин / Изолят высокой очистки"
+        milk_type = "Миндальное или Безлактозное молоко"
         
-        # 2. Обед: Постная говядина + Киноа
-        quinoa_weight = round((c_meal / 57) * 100)
-        quinoa_prot = (quinoa_weight * 14) / 100
-        beef_weight = round((max(10, p_meal - quinoa_prot) / 22) * 100)
-        
-        # 3. Полдник: Орехи Кешью + Греческий йогурт 0%
-        cashew_weight = round((f_meal / 48) * 100)
-        cashew_prot = (cashew_weight * 18) / 100
-        yogurt_weight = round((max(10, p_meal - cashew_prot) / 10) * 100)
-        
-        # 4. Ужин: Тигровые креветки + Бурый рис
-        rice_brown_weight = round((c_meal / 72) * 100)
-        rice_brown_prot = (rice_brown_weight * 7) / 100
-        shrimps_weight = round((max(10, p_meal - rice_brown_prot) / 22) * 100)
+        if plan_variant == 1:
+            # Вариант 1: Овсянка на безлактозном молоке + Белая рыба + Подсолнечные семечки (для жиров)
+            oats_weight = round((c_meal / 62) * 100)
+            white_fish = round((p_meal / 18) * 100)
+            seeds_weight = round((f_meal / 53) * 100)
+            green_veg = "200 г Огурцов и стеблей сельдерея (клетчатка без калорий)"
 
-        menu_text = (
-            f"🥑 *Завтрак:*\n"
-            f"• **{salmon_weight} г** Слабосоленой семги или лосося\n"
-            f"• **{avocado_weight} г** Свежего авокадо\n"
-            f"• **{bread_weight} г** Цельнозернового тостового хлеба\n\n"
-            f"🥩 *Обед:*\n"
-            f"• **{beef_weight} г** Постной говяжьей вырезки\n"
-            f"• **{quinoa_weight} г** Крупы киноа\n\n"
-            f"🥜 *Полдник:*\n"
-            f"• **{cashew_weight} г** Орехов кешью\n"
-            f"• **{yogurt_weight} г** Натурального греческого йогурта 0%\n\n"
-            f"🍤 *Ужин:*\n"
-            f"• **{shrimps_weight} г** Очищенных тигровых креветок или кальмаров\n"
-            f"• **{rice_brown_weight} г** Бурого нешлифованного риса\n"
-        )
+            menu_text = (
+                f"🥣 *Завтрак (Загрузка чистым гликогеном):*\n"
+                f"• **{oats_weight} г** Овсянки (варить на воде или `{milk_type}`)\n"
+                f"• **1.5 порции** {protein_source}\n\n"
+                f"🐟 *Обед (Сухой белок):*\n"
+                f"• **{white_fish} г** Филе трески, пикши или судака\n"
+                f"• **40 г** Зеленой гречки (низкий ГИ)\n\n"
+                f"🌻 *Полдник (Гормональная поддержка жирами):*\n"
+                f"• **{seeds_weight} г** Очищенных подсолнечных семечек\n"
+                f"• **5 шт.** Яичных белков (варёных)\n\n"
+                f"🐟 *Ужин (Финальный слив воды):*\n"
+                f"• **{white_fish} г** Филе белой рыбы на пару\n"
+                f"• **{green_veg}**\n"
+            )
+        elif plan_variant == 2:
+            # Вариант 2: Безлактозный йогурт, кальмары, бурый рис
+            menu_text = (
+                f"🥛 *Завтрак:*\n• **200 г** Натурального безлактозного йогурта 0%\n• **1 порция** Изолята протеина\n• **40 г** Ржаных отрубей\n\n"
+                f"🦑 *Обед:*\n• **200 г** Отварного кальмара (чистый белок без жира)\n• **60 г** Бурого нешлифованного риса\n\n"
+                f"🌱 *Полдник:*\n• **150 г** Салата из брокколи и стручковой фасоли с **1 ст.л.** льняного масла\n• **4 шт.** Яичных белков\n\n"
+                f"🍗 *Ужин:*\n• **180 г** Филе грудки индейки (на пару/гриль)\n• **200 г** Листьев шпината и салата айсберг\n"
+            )
+        else:
+            # Вариант 3: Микс яичных белков, грейпфрут (для жиросжигания), горбуша
+            menu_text = (
+                f"🍳 *Завтрак (Белковый удар):*\n• Омлет из **6 белков** и **1 цельного яйца** (без масла)\n• **1/2 шт.** Грейпфрута\n\n"
+                f"🍗 *Обед:*\n• **170 г** Отварного куриного филе (грудка)\n• **50 г** Крупы Киноа\n\n"
+                f"🥜 *Полдник (Полезные жиры):*\n• **25 г** Орехов (грецкие или семечки)\n• **1 порция** Чистого аминокислотного комплекса (BCAA/EAA)\n\n"
+                f"🐟 *Ужин:*\n• **150 г** Запеченной горбуши (источник омега-3 на сушке)\n• **250 г** Пекинской капусты с лимонным соком\n"
+            )
 
     # Собираем итоговое сообщение плана питания
     text = (
-        f"📖 *Меню еды в базе: {tier_title}*\n"
-        f"🎯 _План составлен строго под твои суточные лимиты:_\n"
+        f"📖 *Текущая корзина: {tier_title}*\n"
+        f"🎯 _План составлен строго под твои суточные лимиты (Пол: {gender}):_\n"
         f"**{target_cals} ккал** | **Б: {target_prot}г** | **Ж: {target_fats}г** | **У: {target_carbs}г**\n\n"
         f"📊 *Средний ориентир на каждый из 4-х приемов:* \n"
         f"~`{cal_meal} ккал` | `Б: {round(p_meal, 1)}г` | `Ж: {round(f_meal, 1)}г` | `У: {round(c_meal, 1)}г` \n\n"
@@ -927,9 +971,11 @@ async def process_diet_tier(c: types.CallbackQuery):
     )
     
     b = InlineKeyboardBuilder()
+    # Кнопка для триггера другого случайного варианта в этой же корзине
+    b.button(text="🔄 Сгенерировать другой вариант", callback_data=f"diet_tier_{tier}")
     b.button(text="🔄 Изменить продуктовую корзину", callback_data="calc_diet_menu")
     b.button(text="⬅️ Вернуться в профиль", callback_data="back_to_profile")
-    b.adjust(1, 1)
+    b.adjust(1, 1, 1)
     
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
