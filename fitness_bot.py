@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -9,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 # Подключаем расширенные базы данных из соседнего файла database.py
 from database import FOOD_DATABASE, EXERCISE_DATABASE
 
-# Используем уже вписанный токен или берем его из окружения (строка адаптирована)
+# Используем уже вписанный токен или берем его из окружения
 TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
 
 bot = Bot(token=TOKEN)
@@ -17,15 +18,13 @@ dp = Dispatcher()
 
 DB_NAME = "fitness_bot.db"
 
-# ==================== СОСТОЯНИЯ FSM (АНКЕТА) ====================
+# ==================== СОСТОЯНИЯ FSM (АНКЕТА И БУДИЛЬНИКИ) ====================
 class RegistrationStates(StatesGroup):
-    # Обязательный блок
     gender = State()
     age = State()
     weight = State()
     height = State()
     goal = State()
-    # Продвинутый блок (можно пропустить)
     strength_workouts = State()
     cardio_workouts = State()
     cardio_details = State()
@@ -35,6 +34,10 @@ class RegistrationStates(StatesGroup):
 
 class FoodStates(StatesGroup):
     waiting_for_batch = State()
+
+class AlarmStates(StatesGroup):
+    waiting_for_meal_name = State()
+    waiting_for_meal_time = State()
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БД ====================
 def init_db():
@@ -46,13 +49,23 @@ def init_db():
             gender TEXT, age INTEGER, weight REAL, height REAL, goal TEXT,
             strength_workouts INTEGER, cardio_workouts INTEGER, 
             cardio_details TEXT, experience TEXT, body_fat REAL, activity_level TEXT,
-            target_calories INTEGER, target_proteins INTEGER, target_fats INTEGER, target_carbs INTEGER
+            target_calories INTEGER, target_proteins INTEGER, target_fats INTEGER, target_carbs INTEGER,
+            timezone TEXT
         )
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_log (
             user_id INTEGER PRIMARY KEY,
             calories REAL DEFAULT 0, proteins REAL DEFAULT 0, fats REAL DEFAULT 0, carbs REAL DEFAULT 0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_meals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            meal_name TEXT,
+            meal_time TEXT,
+            meal_type TEXT DEFAULT 'основной'
         )
     """)
     conn.commit()
@@ -124,7 +137,7 @@ async def process_height(message: types.Message, state: FSMContext):
     await message.answer("🎯 **Ваша цель:**", reply_markup=b.as_markup())
     await state.set_state(RegistrationStates.goal)
 
-# --- ВХОД В ПРОДВИНУТЫЙ БЛОК (ПОСЛЕ ВЫБОРА ЦЕЛИ) ---
+# --- ВХОД В ПРОДВИНУТЫЙ БЛОК ---
 @dp.callback_query(RegistrationStates.goal)
 async def process_goal(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
@@ -136,7 +149,7 @@ async def process_goal(c: types.CallbackQuery, state: FSMContext):
     
     await c.message.edit_text(
         "✨ **Обязательные данные собраны!**\n\n"
-        "Теперь ты можешь ввести продвинутые параметры для более точного подсчета калорий суточной нормы или пропустить их.\n\n"
+        "Теперь ты можешь ввести продвинутые параметры для более точного подсчета калорий или пропустить их.\n\n"
         "✏️ **Сколько силовых тренировок в неделю?**", 
         reply_markup=b.as_markup()
     )
@@ -161,7 +174,7 @@ async def process_cardio(message: types.Message, state: FSMContext):
     
     b = InlineKeyboardBuilder()
     b.button(text="⏩ Пропустить продвинутый блок", callback_data="skip_advanced")
-    await message.answer("✏️ **Длительность кардио и средний пульс во время кардио. Например 60м, 125:**", reply_markup=b.as_markup())
+    await message.answer("✏️ **Длительность кардио и средний пульс. Например 60м, 125:**", reply_markup=b.as_markup())
     await state.set_state(RegistrationStates.cardio_details)
 
 @dp.message(RegistrationStates.cardio_details)
@@ -170,7 +183,7 @@ async def process_cardio_details(message: types.Message, state: FSMContext):
     
     b = InlineKeyboardBuilder()
     b.button(text="⏩ Пропустить продвинутый блок", callback_data="skip_advanced")
-    await message.answer("✏️ **Стаж тренировок в зале. Например 2 года, 5 месяцев:**", reply_markup=b.as_markup())
+    await message.answer("✏️ **Стаж тренировок в зале. Например 2 года:**", reply_markup=b.as_markup())
     await state.set_state(RegistrationStates.experience)
 
 @dp.message(RegistrationStates.experience)
@@ -203,9 +216,8 @@ async def process_activity_click(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
     acts = {"act_1": "Минимальная", "act_2": "Средняя", "act_3": "Высокая"}
     await state.update_data(activity_level=acts[c.data])
-    await save_and_calculate_user(c.message, state)
+    await save_and_calculate_user(c.message, state, user_id=c.from_user.id)
 
-# --- ПЕРЕХВАТ ПРОПУСКА ПРОДВИНУТОГО БЛОКА ---
 @dp.callback_query(F.data == "skip_advanced")
 async def skip_advanced_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
@@ -218,10 +230,10 @@ async def skip_advanced_handler(c: types.CallbackQuery, state: FSMContext):
         if key not in data:
             await state.update_data(**{key: val})
             
-    await save_and_calculate_user(c.message, state)
+    await save_and_calculate_user(c.message, state, user_id=c.from_user.id)
 
 # ==================== МАТЕМАТИКА РАСЧЕТА СУТОЧНОЙ НОРМЫ ====================
-async def save_and_calculate_user(message: types.Message, state: FSMContext):
+async def save_and_calculate_user(message: types.Message, state: FSMContext, user_id: int):
     data = await state.get_data()
     await state.clear()
     
@@ -259,13 +271,14 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO users (user_id, gender, age, weight, height, goal, strength_workouts, cardio_workouts, cardio_details, experience, body_fat, activity_level, target_calories, target_proteins, target_fats, target_carbs)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        message.chat.id, data['gender'], data['age'], data['weight'], data['height'], data['goal'],
+        user_id, data['gender'], data['age'], data['weight'], data['height'], data['goal'],
         data['strength_workouts'], data['cardio_workouts'], data['cardio_details'],
         data['experience'], data['body_fat'], data['activity_level'], cals, prot, fats, carbs
     ))
-    cursor.execute("INSERT OR IGNORE INTO daily_log (user_id) VALUES (?)", (message.chat.id,))
+    cursor.execute("INSERT OR IGNORE INTO daily_log (user_id) VALUES (?)", (user_id,))
     conn.commit()
     conn.close()
 
@@ -276,24 +289,31 @@ async def save_and_calculate_user(message: types.Message, state: FSMContext):
     )
 
 # ==================== ГЛАВНЫЙ ИНТЕРФЕЙС ПРОФИЛЯ ====================
-@dp.message(F.text == "📋 Мой профиль")
-async def view_profile(message: types.Message):
+async def get_profile_data(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         SELECT gender, weight, age, height, target_calories, target_proteins, target_fats, target_carbs 
         FROM users WHERE user_id = ?
-    """, (message.from_user.id,))
+    """, (user_id,))
     r = cursor.fetchone()
     
-    cursor.execute("SELECT calories, proteins, fats, carbs FROM daily_log WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT calories, proteins, fats, carbs FROM daily_log WHERE user_id = ?", (user_id,))
     l = cursor.fetchone() or (0, 0, 0, 0)
     conn.close()
+    return r, l
 
+@dp.message(F.text == "📋 Мой профиль")
+async def profile_menu_msg(message: types.Message):
+    r, l = await get_profile_data(message.from_user.id)
     if not r:
         await message.answer("Профиль пуст. Нажмите /start для заполнения анкеты КБЖУ.")
         return
+    
+    text, markup = generate_profile_interface(r, l)
+    await message.answer(text, reply_markup=markup, parse_mode="Markdown")
 
+def generate_profile_interface(r, l):
     text = (
         f"📋 **Профиль**\n\n"
         f"Пол: {r[0]}\n"
@@ -306,23 +326,15 @@ async def view_profile(message: types.Message):
         f"▪️ Жиры: `{round(l[2], 1)}` / `{r[6]}` г\n"
         f"▪️ Углеводы: `{round(l[3], 1)}` / `{r[7]}` г"
     )
-
     b = InlineKeyboardBuilder()
-    
-    # Ряд 1: Сбросить профиль | Подсчет КБЖУ
     b.button(text="🗑️ Сбросить профиль", callback_data="clear_profile")
     b.button(text="🍽️ Подсчет КБЖУ", callback_data="inline_eat")
-    
-    # Ряд 2: Конструктор тренировочного плана | Меню еды в базе данных
-    b.button(text="🏋️ Конструктор тренировочного плана", callback_data="inline_workout")
-    b.button(text="📖 Меню еды в базе данных", callback_data="view_food_db")
-    
-    # Ряд 3: Календарь приема пищи
+    b.button(text="🏋️ Конструктор тренировок", callback_data="inline_workout")
+    b.button(text="📖 Menu еды в базе", callback_data="view_food_db")
     b.button(text="📅 Календарь приема пищи", callback_data="food_calendar")
-    
-    b.adjust(2, 2, 1)
-    
-    await message.answer(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    b.button(text="🍎 Рассчитать рацион питания", callback_data="calc_diet_menu")
+    b.adjust(2, 2, 1, 1)
+    return text, b.as_markup()
 
 # ==================== ОБРАБОТЧИКИ ФУНКЦИЙ МЕНЮ ====================
 @dp.callback_query(F.data == "clear_profile")
@@ -332,6 +344,7 @@ async def clear_profile_handler(c: types.CallbackQuery):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM users WHERE user_id = ?", (c.from_user.id,))
     cursor.execute("DELETE FROM daily_log WHERE user_id = ?", (c.from_user.id,))
+    cursor.execute("DELETE FROM user_meals WHERE user_id = ?", (c.from_user.id,))
     conn.commit()
     conn.close()
     await c.message.edit_text("💥 Профиль сброшен. Для повторного заполнения анкеты отправь команду /start")
@@ -339,14 +352,13 @@ async def clear_profile_handler(c: types.CallbackQuery):
 @dp.callback_query(F.data == "inline_eat")
 async def inline_eat_handler(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе, 30г семечки`):")
+    await c.message.answer("📝 Введите съеденные продукты через запятую (например: `100г овсянка, 150г куриное филе`):")
     await state.set_state(FoodStates.waiting_for_batch)
 
 @dp.message(FoodStates.waiting_for_batch)
 async def process_batch_food(message: types.Message, state: FSMContext):
     await state.clear()
     raw_text = message.text.lower()
-    
     added_cals, added_prot, added_fats, added_carbs = 0, 0, 0, 0
     items = raw_text.split(",")
     
@@ -372,7 +384,7 @@ async def process_batch_food(message: types.Message, state: FSMContext):
                 break
                 
     if added_cals == 0:
-        return await message.answer("❌ Бот не распознал продукты. Проверьте правильность написания по кнопке «Меню еды в базе данных».")
+        return await message.answer("❌ Бот не распознал продукты. Проверьте написание по кнопке «Меню еды в базе».")
         
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -385,18 +397,20 @@ async def process_batch_food(message: types.Message, state: FSMContext):
     conn.close()
     
     await message.answer(f"✅ Добавлено: +{round(added_cals)} ккал (Б:{round(added_prot,1)} | Ж:{round(added_fats,1)} | У:{round(added_carbs,1)})")
-    await view_profile(message)
+    
+    r, l = await get_profile_data(message.from_user.id)
+    if r:
+        text, markup = generate_profile_interface(r, l)
+        await message.answer(text, reply_markup=markup, parse_mode="Markdown")
 
-# --- ПРОСМОТР УПРАЖНЕНИЙ ---
+# --- КОНСТРУКТОР ТРЕНИРОВОК ---
 @dp.callback_query(F.data == "inline_workout")
 async def inline_workout_handler(c: types.CallbackQuery):
     await c.answer()
-    text = "🏋️ **Конструктор плана тренировок**\n\nВыбери группу мышц для получения списка из 15 упражнений:"
-    
+    text = "🏋️ **Конструктор плана тренировок**\n\nВыбери группу мышц для получения списка упражнений:"
     b = InlineKeyboardBuilder()
     for category in EXERCISE_DATABASE.keys():
         b.button(text=f"💪 {category}", callback_data=f"ex_cat_{category}")
-    
     b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
     b.adjust(2, 2, 2, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
@@ -406,11 +420,9 @@ async def show_exercises_by_category(c: types.CallbackQuery):
     await c.answer()
     category = c.data.replace("ex_cat_", "")
     exercises = EXERCISE_DATABASE.get(category, [])
-    
     text = f"🏋️ **15 лучших упражнений на группу «{category}»:**\n\n"
     for idx, ex in enumerate(exercises, 1):
         text += f"{idx}. {ex}\n"
-        
     b = InlineKeyboardBuilder()
     b.button(text="🔄 К выбору категорий", callback_data="inline_workout")
     b.button(text="⬅️ В профиль", callback_data="back_to_profile")
@@ -421,12 +433,10 @@ async def show_exercises_by_category(c: types.CallbackQuery):
 @dp.callback_query(F.data == "view_food_db")
 async def view_food_db_handler(c: types.CallbackQuery):
     await c.answer()
-    
     categories = {}
     for name, info in FOOD_DATABASE.items():
         cat = info.get("cat", "Разное")
-        if cat not in categories:
-            categories[cat] = []
+        if cat not in categories: categories[cat] = []
         categories[cat].append(f"• {name.capitalize()} ({info['cals']} ккал | Б:{info['prot']} | Ж:{info['fats']} | У:{info['carbs']})")
     
     text = "📖 **Доступные продукты в базе данных (на 100г):**\n\n"
@@ -437,7 +447,7 @@ async def view_food_db_handler(c: types.CallbackQuery):
     b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
     await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
 
-# --- КАЛЕНДАРЬ ПРИЕМА ПИЩИ ---
+# --- КАЛЕНДАРЬ ПРИЕМА ПИЩИ И ПЕРЕХОД К БУДИЛЬНИКАМ ---
 @dp.callback_query(F.data == "food_calendar")
 async def food_calendar_handler(c: types.CallbackQuery):
     await c.answer()
@@ -448,14 +458,332 @@ async def food_calendar_handler(c: types.CallbackQuery):
         "🟡 Среда (Сегодня): Прогресс обновляется динамически в профиле."
     )
     b = InlineKeyboardBuilder()
+    b.button(text="⏰ Установить Будильник", callback_data="set_alarm_tz")
     b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
+    b.adjust(1, 1)
     await c.message.edit_text(text, reply_markup=b.as_markup())
 
+# --- ВЫБОР ЧАСОВОГО ПОЯСА ДЛЯ БУДИЛЬНИКА ---
+@dp.callback_query(F.data == "set_alarm_tz")
+async def set_alarm_tz_handler(c: types.CallbackQuery):
+    await c.answer()
+    text = (
+        "⏰ **Настройка будильника**\n\n"
+        "Пожалуйста, выберите часовой пояс вашего региона для корректной отправки уведомлений:"
+    )
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="МСК−1 — Калининградское время", callback_data="tz_msk_minus_1")
+    b.button(text="МСК+0 — Москва, МО", callback_data="tz_msk_0")
+    b.button(text="МСК+1 — Самарское время", callback_data="tz_msk_plus_1")
+    b.button(text="МСК+2 — Екатеринбургское время", callback_data="tz_msk_plus_2")
+    b.button(text="МСК+3 — Омское время", callback_data="tz_msk_plus_3")
+    b.button(text="МСК+4 — Красноярское время", callback_data="tz_msk_plus_4")
+    b.button(text="МСК+5 — Иркутское время", callback_data="tz_msk_plus_5")
+    b.button(text="МСК+6 — Якутское время", callback_data="tz_msk_plus_6")
+    b.button(text="МСК+7 — Владивостокское время", callback_data="tz_msk_plus_7")
+    b.button(text="МСК+8 — Магаданское время", callback_data="tz_msk_plus_8")
+    b.button(text="МСК+9 — Камчатское время", callback_data="tz_msk_plus_9")
+    b.button(text="⬅️ Назад в календарь", callback_data="food_calendar")
+    
+    b.adjust(1)
+    await c.message.edit_text(text, reply_markup=b.as_markup())
+
+# --- ОБРАБОТКА ВЫБРАННОГО ПОЯСА И ПЕРЕХОД К ВЫБОРУ ТИПА ПРИЕМА ---
+@dp.callback_query(F.data.startswith("tz_"))
+async def process_timezone_selection(c: types.CallbackQuery):
+    await c.answer()
+    tz_code = c.data.replace("tz_", "")
+    
+    tz_info = {
+        "msk_minus_1": "МСК−1 (UTC+02:00)", "msk_0": "МСК+0 (UTC+03:00)", "msk_plus_1": "МСК+1 (UTC+04:00)",
+        "msk_plus_2": "МСК+2 (UTC+05:00)", "msk_plus_3": "МСК+3 (UTC+06:00)", "msk_plus_4": "МСК+4 (UTC+07:00)",
+        "msk_plus_5": "МСК+5 (UTC+08:00)", "msk_plus_6": "МСК+6 (UTC+09:00)", "msk_plus_7": "МСК+7 (UTC+10:00)",
+        "msk_plus_8": "МСК+8 (UTC+11:00)", "msk_plus_9": "МСК+9 (UTC+12:00)"
+    }
+    tz_name = tz_info.get(tz_code, "МСК+0 (UTC+03:00)")
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET timezone = ? WHERE user_id = ?", (tz_name, c.from_user.id))
+    conn.commit()
+    conn.close()
+
+    await show_meal_type_selection(c.message, c.from_user.id, f"✅ Часовой пояс `{tz_name}` успешно сохранен!\n\n")
+
+# --- ГЛАВНОЕ ОКНО УПРАВЛЕНИЯ РАСПИСАНИЕМ ---
+async def show_meal_type_selection(message: types.Message, user_id: int, prefix_text=""):
+    text = (
+        f"{prefix_text}⏰ **Настройка расписания будильников**\n\n"
+        "Бот будет присылать напоминания **за 30 минут до** и **ровно во время** каждого приема пищи.\n\n"
+        "Вы можете настроить всё самостоятельно или доверить это боту:"
+    )
+    b = InlineKeyboardBuilder()
+    b.button(text="🍽️ Основное время приема пищи", callback_data="meal_manage_main")
+    b.button(text="🍕 Дополнительное время приема", callback_data="meal_manage_sub")
+    b.button(text="🤖 Автоподбор идеального времени под меня", callback_data="meal_auto_generate")
+    b.button(text="🗑️ Стереть будильники и начать заново", callback_data="meal_clear_all")
+    b.button(text="⬅️ Назад к часовым поясам", callback_data="set_alarm_tz")
+    b.adjust(1)
+    
+    if message.text:
+        await message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    else:
+        await message.answer(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+# --- СТРУКТУРИРОВАННЫЕ СПИСКИ (ОСНОВНЫЕ ИЛИ ДОПОЛНИТЕЛЬНЫЕ) ---
+@dp.callback_query(F.data.startswith("meal_manage_"))
+async def meal_manage_handler(c: types.CallbackQuery):
+    await c.answer()
+    m_type = "основной" if c.data == "meal_manage_main" else "дополнительный"
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, meal_name, meal_time FROM user_meals WHERE user_id = ? AND meal_type = ?", (c.from_user.id, m_type))
+    meals = cursor.fetchall()
+    conn.close()
+    
+    text = f"📋 **{m_type.capitalize()} время приемов пищи:**\n\n"
+    if not meals:
+        text += "_Список пока пуст._\n"
+    else:
+        for m in meals:
+            text += f"• *{m[1]}* — ⏰ {m[2]}\n"
+            
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Добавить прием пищи", callback_data=f"meal_add_{m_type}")
+    
+    if meals:
+        if m_type == "основной":
+            b.button(text="🔄 Сделать созданные дополнительными", callback_data="meal_switch_to_sub")
+        else:
+            b.button(text="🔄 Сделать созданные основными", callback_data="meal_switch_to_main")
+            
+    b.button(text="⬅️ Назад", callback_data="meal_back_to_types")
+    b.adjust(1)
+    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+# --- СМЕНА СТАТУСА ПРИЕМОВ (ИНВЕРСИЯ КАТЕГОРИЙ) ---
+@dp.callback_query(F.data.startswith("meal_switch_to_"))
+async def meal_switch_handler(c: types.CallbackQuery):
+    await c.answer()
+    target_type = "основной" if c.data == "meal_switch_to_main" else "дополнительный"
+    current_type = "дополнительный" if target_type == "основной" else "основной"
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE user_meals SET meal_type = ? WHERE user_id = ? AND meal_type = ?", (target_type, c.from_user.id, current_type))
+    conn.commit()
+    conn.close()
+    
+    await c.message.edit_text(f"🔄 Все приемы пищи из категории *{current_type}* переведены в статус *{target_type}*!")
+    await show_meal_type_selection(c.message, c.from_user.id)
+
+@dp.callback_query(F.data == "meal_back_to_types")
+async def meal_back_to_types_handler(c: types.CallbackQuery):
+    await c.answer()
+    await show_meal_type_selection(c.message, c.from_user.id)
+
+# --- ДОБАВЛЕНИЕ ПРИЕМА ПИЩИ (ПРОЦЕСС FSM) ---
+@dp.callback_query(F.data.startswith("meal_add_"))
+async def meal_add_start(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    m_type = c.data.replace("meal_add_", "")
+    await state.update_data(m_type=m_type)
+    
+    await c.message.edit_text("✏️ Введите название приема пищи (например: `Обед`):")
+    await state.set_state(AlarmStates.waiting_for_meal_name)
+
+@dp.message(AlarmStates.waiting_for_meal_name)
+async def meal_name_chosen(message: types.Message, state: FSMContext):
+    await state.update_data(meal_name=message.text.strip())
+    await message.answer("⏰ Теперь укажите время в формате ЧЧ:ММ (например: `13:00`):")
+    await state.set_state(AlarmStates.waiting_for_meal_time)
+
+@dp.message(AlarmStates.waiting_for_meal_time)
+async def meal_time_chosen(message: types.Message, state: FSMContext):
+    time_text = message.text.strip()
+    if not re.match(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", time_text):
+        return await message.answer("❌ Некорректный формат времени. Введите время как в примере (например, 13:00):")
+    
+    data = await state.get_data()
+    await state.clear()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_meals (user_id, meal_name, meal_time, meal_type) VALUES (?, ?, ?, ?)
+    """, (message.from_user.id, data['meal_name'], time_text, data['m_type']))
+    conn.commit()
+    conn.close()
+    
+    # Расчет пред-уведомления за 30 минут
+    hours, minutes = map(int, time_text.split(":"))
+    total_minutes = hours * 60 + minutes - 30
+    if total_minutes < 0:
+        total_minutes += 24 * 60
+    pre_time = f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+    text = (
+        f"💾 **Сохранено!**\n\n"
+        f"🍔 Прием пищи: *{data['meal_name']}* — {time_text}\n"
+        f"🔔 Напоминания установлены на:\n"
+        f"1. `{pre_time}` (За 30 минут)\n"
+        f"2. `{time_text}` (Во время приема)\n\n"
+        f"Желаете добавить что-то еще или сохранить настройки будильника?"
+    )
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Добавить еще один прием пищи", callback_data=f"meal_add_{data['m_type']}")
+    b.button(text="💾 Сохранить и выйти в профиль", callback_data="back_to_profile")
+    b.adjust(1)
+    
+    await message.answer(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+# --- 🤖 АВТОПОДБОРОЧНАЯ СЕТКА ПИТАНИЯ ---
+@dp.callback_query(F.data == "meal_auto_generate")
+async def meal_auto_generate_handler(c: types.CallbackQuery):
+    await c.answer()
+    user_id = c.from_user.id
+    
+    default_meals = [
+        ("Завтрак", "08:30", "основной"),
+        ("Обед", "13:00", "основной"),
+        ("Полдник", "16:30", "дополнительный"),
+        ("Ужин", "20:00", "основной")
+    ]
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_meals WHERE user_id = ?", (user_id,))
+    
+    for name, time_val, m_type in default_meals:
+        cursor.execute("""
+            INSERT INTO user_meals (user_id, meal_name, meal_time, meal_type) 
+            VALUES (?, ?, ?, ?)
+        """, (user_id, name, time_val, m_type))
+    conn.commit()
+    conn.close()
+    
+    text = (
+        "🤖 ✨ **Бот подобрал для вас идеальный спортивный режим питания!**\n\n"
+        "Расписание сбалансировано для стабильного удержания азотистого баланса и высокого анаболизма:\n\n"
+        "🍳 *Завтрак* — ⏰ 08:30 (Напоминание в 08:00)\n"
+        "🍗 *Обед* — ⏰ 13:00 (Напоминание в 12:30)\n"
+        "🍌 *Полдник* — ⏰ 16:30 (Напоминание в 16:00)\n"
+        "🐟 *Ужин* — ⏰ 20:00 (Напоминание в 19:30)\n\n"
+        "Вы можете в любой момент изменить или сбросить этот план."
+    )
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="📋 В профиль", callback_data="back_to_profile")
+    b.button(text="🔄 Скорректировать вручную", callback_data="meal_back_to_types")
+    b.adjust(1, 1)
+    
+    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+# --- 🗑️ СТИРАНИЕ И ПОЛНЫЙ СБРОС БУДИЛЬНИКОВ ---
+@dp.callback_query(F.data == "meal_clear_all")
+async def meal_clear_all_handler(c: types.CallbackQuery):
+    await c.answer()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_meals WHERE user_id = ?", (c.from_user.id,))
+    conn.commit()
+    conn.close()
+    
+    await show_meal_type_selection(
+        c.message, 
+        c.from_user.id, 
+        prefix_text="💥 **Все ваши будильники успешно стерты!** Окна питания очищены, можно настраивать заново.\n\n"
+    )
+
+# --- РАСЧЕТ РАЦИОНА ПИТАНИЯ ---
+@dp.callback_query(F.data == "calc_diet_menu")
+async def calc_diet_menu_handler(c: types.CallbackQuery):
+    await c.answer()
+    text = (
+        "🍎 **Расчет индивидуального рациона**\n\n"
+        "Выберите желаемый вариант продуктовой корзины для генерации меню:\n\n"
+        "🔸 **Бюджетный** — простая, доступная и полезная еда с повторяющейся структурой (овсянка, яйца, куриное филе, гречка, подсолнечное масло/семечки).\n"
+        "🔸 **Стандартный** — оптимальный баланс цены и комфорта, добавляется больше разнообразия гарниров и источников белка (индейка, рис, творог, бананы).\n"
+        "🔸 **Дорогой** — максимальное гастрономическое разнообразие блюд (красная рыба, говядина, орехи, морепродукты, авокадо)."
+    )
+    b = InlineKeyboardBuilder()
+    b.button(text="Бюджетный 💰", callback_data="diet_tier_budget")
+    b.button(text="Стандартный ⚖️", callback_data="diet_tier_standard")
+    b.button(text="Дорогой 💎", callback_data="diet_tier_luxury")
+    b.button(text="⬅️ Назад в профиль", callback_data="back_to_profile")
+    b.adjust(1, 1, 1, 1)
+    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("diet_tier_"))
+async def process_diet_tier(c: types.CallbackQuery):
+    await c.answer()
+    tier = c.data.replace("diet_tier_", "")
+    
+    r, _ = await get_profile_data(c.from_user.id)
+    if not r:
+        return await c.message.edit_text("Ошибка: профиль не найден. Пройдите регистрацию.")
+    
+    target_cals, target_prot, target_fats, target_carbs = r[4], r[5], r[6], r[7]
+    
+    p_meal = round(target_prot / 4, 1)
+    f_meal = round(target_fats / 4, 1)
+    c_meal = round(target_carbs / 4, 1)
+    cal_meal = round(target_cals / 4)
+
+    if tier == "budget":
+        tier_title = "💰 Бюджетный рацион (Полезно и доступно)"
+        menu_text = (
+            f"🍳 *Завтрак:*\n• Овсяные хлопья (на воде/молоке) + 2 цельных яйца\n\n"
+            f"🍗 *Обед:*\n• Отварное куриное филе + гречневая крупа\n\n"
+            f"🌻 *Полдник:*\n• Омлет из белков + горсть жареных очищенных подсолнечных семечек\n\n"
+            f"🐟 *Ужин:*\n• Минтай или белая рыба на пару + свежая капуста/огурец\n"
+        )
+    elif tier == "standard":
+        tier_title = "⚖️ Стандартный рацион (Разнообразно и оптимально)"
+        menu_text = (
+            f"🥞 *Завтрак:*\n• Овсяноблин с сыром + легкий творог 5%\n\n"
+            f"🥩 *Обед:*\n• Стейк из грудки индейки + пропаренный рис + томаты\n\n"
+            f"🍌 *Полдник:*\n• Банан + протеиновый шейк или йогурт\n\n"
+            f"🍗 *Ужин:*\n• Запеченное куриное филе + макароны из твердых сортов + оливковое масло\n"
+        )
+    else:
+        tier_title = "💎 Дорогой рацион (Максимальное разнообразие)"
+        menu_text = (
+            f"🥑 *Завтрак:*\n• Тосты со слабосоленым лососем, авокадо и яйцом пашот\n\n"
+            f"🥩 *Обед:*\n• Постная говядина/телятина на гриле + киноа или бурый рис + брокколи\n\n"
+            f"🥜 *Полдник:*\n• Микс элитных орехов (кешью, миндаль) + греческий йогурт\n\n"
+            f"🍤 *Ужин:*\n• Тигровые креветки или кальмары + легкий салат с сыром фета\n"
+        )
+
+    text = (
+        f"📋 *{tier_title}*\n"
+        f"🍱 _Сгенерирован под твои параметры нормы КБЖУ_\n\n"
+        f"🎯 *Цель на каждый из 4-х приемов пищи:*\n"
+        f" Каждый прием должен содержать примерно: *{cal_meal} ккал* | "
+        f"*Б: {p_meal}г* | *Ж: {f_meal}г* | *У: {c_meal}г*\n\n"
+        f"{menu_text}\n"
+        f"💡 _Взвешивай продукты в сухом/сыром виде перед готовкой для соблюдения лимитов БЖУ!_"
+    )
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="🔄 Изменить вариант корзины", callback_data="calc_diet_menu")
+    b.button(text="⬅️ В профиль", callback_data="back_to_profile")
+    await c.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="Markdown")
+
+# --- ХЭНДЛЕР НАЗАД В ПРОФИЛЬ ---
 @dp.callback_query(F.data == "back_to_profile")
 async def back_to_profile_handler(c: types.CallbackQuery):
     await c.answer()
-    await c.message.delete()
-    await view_profile(c.message)
+    r, l = await get_profile_data(c.from_user.id)
+    if r:
+        text, markup = generate_profile_interface(r, l)
+        await c.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        await c.message.edit_text("Профиль пуст. Нажмите /start для заполнения анкеты КБЖУ.")
 
 # ==================== ЗАПУСК БОТА ====================
 if __name__ == "__main__":
